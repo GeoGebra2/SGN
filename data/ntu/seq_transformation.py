@@ -221,12 +221,12 @@ def get_indices(performer, camera, evaluation='CS'):
         # Get indices of test data
         for idx in test_ids:
             temp = np.where(performer == idx)[0]  # 0-based index
-            test_indices = np.hstack((test_indices, temp)).astype(np.int)
+            test_indices = np.hstack((test_indices, temp)).astype(int)
 
         # Get indices of training data
         for train_id in train_ids:
             temp = np.where(performer == train_id)[0]  # 0-based index
-            train_indices = np.hstack((train_indices, temp)).astype(np.int)
+            train_indices = np.hstack((train_indices, temp)).astype(int)
     else:  # Cross View (Camera IDs)
         train_ids = [2, 3]
         test_ids = 1
@@ -248,7 +248,7 @@ if __name__ == '__main__':
     label = np.loadtxt(label_file, dtype=int) - 1  # action label: 0~59
 
     frames_cnt = np.loadtxt(frames_file, dtype=int)  # frames_cnt
-    skes_name = np.loadtxt(skes_name_file, dtype=np.string_)
+    skes_name = np.loadtxt(skes_name_file, dtype=str)
 
     with open(raw_skes_joints_pkl, 'rb') as fr:
         skes_joints = pickle.load(fr)  # a list
