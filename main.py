@@ -59,12 +59,12 @@ def main():
     if args.monitor == 'val_acc':
         mode = 'max'
         monitor_op = np.greater
-        best = -np.Inf
+        best = -np.inf
         str_op = 'improve'
     elif args.monitor == 'val_loss':
         mode = 'min'
         monitor_op = np.less
-        best = np.Inf
+        best = np.inf
         str_op = 'reduce'
 
     scheduler = MultiStepLR(optimizer, milestones=[60, 90, 110], gamma=0.1)
