@@ -8,7 +8,6 @@ import h5py
 import random
 import os.path as osp
 import sys
-from six.moves import xrange
 import math
 import scipy.misc
 if sys.version_info[0] == 2:
