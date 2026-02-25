@@ -117,7 +117,7 @@ class NTUDataLoaders(object):
             x = list(x)
 
         x, y = self.Tolist_fix(x, y, train=1)
-        lens = np.array([x_.shape[0] for x_ in x], dtype=np.int)
+        lens = np.array([x_.shape[0] for x_ in x], dtype=int)
         idx = lens.argsort()[::-1]  # sort sequence by valid length in descending order
         y = np.array(y)[idx]
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
