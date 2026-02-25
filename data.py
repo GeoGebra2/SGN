@@ -126,6 +126,11 @@ class NTUDataLoaders(object):
                 theta = 0.3
             elif self.case == 1:
                 theta = 0.5
+        elif self.dataset == 'NTU_ID':
+            if self.case == 0:
+                theta = 0.3
+            elif self.case == 1:
+                theta = 0.5
         elif self.dataset == 'NTU120':
             theta = 0.3
 
