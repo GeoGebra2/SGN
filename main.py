@@ -104,8 +104,8 @@ def main():
             t_start = time.time()
             train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch)
             val_loss, val_acc = validate(val_loader, model, criterion)
-            log_res += [[train_loss, train_acc.cpu().numpy(),\
-                         val_loss, val_acc.cpu().numpy()]]
+            log_res += [[train_loss, float(train_acc),\
+                         val_loss, float(val_acc)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
                   'Train: loss {:.4f}\taccu {:.4f}\tValid: loss {:.4f}\taccu {:.4f}'
@@ -114,7 +114,7 @@ def main():
             current = val_loss if mode == 'min' else val_acc
 
             ####### store tensor in cpu
-            current = current.cpu()
+            current = float(current)
 
             if monitor_op(current, best):
                 print('Epoch %d: %s %sd from %.4f to %.4f, '
