@@ -54,17 +54,17 @@ class NTUDataLoaders(object):
         if self.dataset == 'NTU' or self.dataset == 'NTU_ID' or self.dataset == 'kinetics' or self.dataset == 'NTU120':
             return DataLoader(self.val_set, batch_size=batch_size,
                               shuffle=False, num_workers=num_workers,
-                              collate_fn=self.collate_fn_fix_val, pin_memory=True, drop_last=True)
+                              collate_fn=self.collate_fn_fix_val, pin_memory=True, drop_last=False)
         else:
             return DataLoader(self.val_set, batch_size=batch_size,
                               shuffle=False, num_workers=num_workers,
-                              collate_fn=self.collate_fn_fix_val, pin_memory=True, drop_last=True)
+                              collate_fn=self.collate_fn_fix_val, pin_memory=True, drop_last=False)
 
 
     def get_test_loader(self, batch_size, num_workers):
         return DataLoader(self.test_set, batch_size=batch_size,
                           shuffle=False, num_workers=num_workers,
-                          collate_fn=self.collate_fn_fix_test, pin_memory=True, drop_last=True)
+                          collate_fn=self.collate_fn_fix_test, pin_memory=True, drop_last=False)
 
     def get_train_size(self):
         return len(self.train_Y)
