@@ -12,17 +12,6 @@ class SGN(nn.Module):
         self.dataset = dataset
         self.seg = seg
         num_joint = 25
-        bs = args.batch_size
-        if args.train:
-            self.spa = self.one_hot(bs, num_joint, self.seg)
-            self.spa = self.spa.permute(0, 3, 2, 1).cuda()
-            self.tem = self.one_hot(bs, self.seg, num_joint)
-            self.tem = self.tem.permute(0, 3, 1, 2).cuda()
-        else:
-            self.spa = self.one_hot(32 * 5, num_joint, self.seg)
-            self.spa = self.spa.permute(0, 3, 2, 1).cuda()
-            self.tem = self.one_hot(32 * 5, self.seg, num_joint)
-            self.tem = self.tem.permute(0, 3, 1, 2).cuda()
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
         self.spa_embed = embed(num_joint, 64, norm=False, bias=bias)
@@ -56,8 +45,10 @@ class SGN(nn.Module):
         dif = input[:, :, :, 1:] - input[:, :, :, 0:-1]
         dif = torch.cat([dif.new(bs, dif.size(1), num_joints, 1).zero_(), dif], dim=-1)
         pos = self.joint_embed(input)
-        tem1 = self.tem_embed(self.tem)
-        spa1 = self.spa_embed(self.spa)
+        spa = self.one_hot(bs, num_joints, step).permute(0, 3, 2, 1).to(input.device)
+        tem = self.one_hot(bs, step, num_joints).permute(0, 3, 1, 2).to(input.device)
+        tem1 = self.tem_embed(tem)
+        spa1 = self.spa_embed(spa)
         dif = self.dif_embed(dif)
         dy = pos + dif
         # Joint-level Module
