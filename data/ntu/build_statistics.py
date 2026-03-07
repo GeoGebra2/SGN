@@ -17,6 +17,36 @@ def list_skeletons(root):
                 out.append(osp.join(dirpath, f))
     out.sort()
     return out
+def has_valid_frame(lines):
+    try:
+        num_frames = int(lines[0].strip())
+    except Exception:
+        return False
+    cur = 1
+    valid = False
+    for _ in range(num_frames):
+        if cur >= len(lines):
+            break
+        try:
+            nb = int(lines[cur].strip())
+        except Exception:
+            break
+        cur += 1
+        if nb > 0:
+            valid = True
+        for _ in range(nb):
+            if cur >= len(lines):
+                break
+            cur += 1
+            if cur >= len(lines):
+                break
+            try:
+                nj = int(lines[cur].strip())
+            except Exception:
+                nj = 0
+            cur += 1
+            cur += nj
+    return valid
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--skes_dir', type=str, default='./ntu-batch')
@@ -38,9 +68,11 @@ def main():
             continue
         try:
             with open(fp, 'r') as fr:
-                line = fr.readline()
-                _ = int(line.strip())
+                lines = fr.readlines()
         except Exception:
+            missing.append(name)
+            continue
+        if not has_valid_frame(lines):
             missing.append(name)
             continue
         s, c, p, r, a = meta
