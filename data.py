@@ -120,6 +120,7 @@ class NTUDataLoaders(object):
         idx = lens.argsort()[::-1]  # sort sequence by valid length in descending order
         y = np.array(y)[idx]
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.dataset == 'NTU':
             if self.case == 0:
@@ -150,6 +151,7 @@ class NTUDataLoaders(object):
         y = np.array(y)
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -164,6 +166,7 @@ class NTUDataLoaders(object):
 
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         y = torch.LongTensor(y)
 
         return [x, y]
