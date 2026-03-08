@@ -312,6 +312,8 @@ def get_two_actors_points(bodies_data):
     bodies_info += noise_info
 
     bodies_data = list(bodies_data)
+    if len(bodies_data) == 0:
+        return None, None
     if len(bodies_data) == 1:  # Only left one actor after denoising
         if label >= 50:  # DEBUG: Denoising failed for two-subjects action
             fail_logger_2.info(ske_name)
@@ -403,6 +405,8 @@ def get_raw_denoised_data():
             joints, colors = get_one_actor_points(body_data, num_frames)
         else:  # more than 1 actor, select two main actors
             joints, colors = get_two_actors_points(bodies_data)
+            if joints is None:
+                continue
             # Remove missing frames
             joints, colors = remove_missing_frames(ske_name, joints, colors)
             num_frames = joints.shape[0]  # Update
