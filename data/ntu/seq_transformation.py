@@ -249,6 +249,12 @@ if __name__ == '__main__':
 
     frames_cnt = np.loadtxt(frames_file, dtype=int)  # frames_cnt
     skes_name = np.loadtxt(skes_name_file, dtype=str)
+    kept_indices_file = osp.join(denoised_path, 'kept_indices.txt')
+    if osp.exists(kept_indices_file):
+        kept_indices = np.loadtxt(kept_indices_file, dtype=int)
+        performer = performer[kept_indices]
+        camera = camera[kept_indices]
+        label = label[kept_indices]
 
     with open(raw_skes_joints_pkl, 'rb') as fr:
         skes_joints = pickle.load(fr)  # a list

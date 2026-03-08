@@ -393,6 +393,7 @@ def get_raw_denoised_data():
     raw_denoised_joints = []
     raw_denoised_colors = []
     frames_cnt = []
+    kept_indices = []
 
     for (idx, bodies_data) in enumerate(raw_skes_data):
         ske_name = bodies_data['name']
@@ -403,10 +404,12 @@ def get_raw_denoised_data():
             num_frames = bodies_data['num_frames']
             body_data = list(bodies_data['data'].values())[0]
             joints, colors = get_one_actor_points(body_data, num_frames)
+            kept_indices.append(idx)
         else:  # more than 1 actor, select two main actors
             joints, colors = get_two_actors_points(bodies_data)
             if joints is None:
                 continue
+            kept_indices.append(idx)
             # Remove missing frames
             joints, colors = remove_missing_frames(ske_name, joints, colors)
             num_frames = joints.shape[0]  # Update
@@ -431,6 +434,7 @@ def get_raw_denoised_data():
 
     frames_cnt = np.array(frames_cnt, dtype=int)
     np.savetxt(osp.join(save_path, 'frames_cnt.txt'), frames_cnt, fmt='%d')
+    np.savetxt(osp.join(save_path, 'kept_indices.txt'), np.array(kept_indices, dtype=int), fmt='%d')
 
     print('Saved raw denoised positions of {} frames into {}'.format(np.sum(frames_cnt),
                                                                      raw_skes_joints_pkl))
