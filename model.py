@@ -4,6 +4,27 @@ from torch import nn
 import torch
 import math
 
+NTU_BONES = [
+    (0, 1), (1, 20), (20, 2), (2, 3),
+    (20, 4), (4, 5), (5, 6), (6, 7), (7, 21), (7, 22),
+    (20, 8), (8, 9), (9, 10), (10, 11), (11, 23), (11, 24),
+    (0, 12), (12, 13), (13, 14), (14, 15),
+    (0, 16), (16, 17), (17, 18), (18, 19)
+]
+
+class GradientReverseFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, coeff):
+        ctx.coeff = coeff
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.coeff * grad_output, None
+
+def grad_reverse(x, coeff=1.0):
+    return GradientReverseFunction.apply(x, coeff)
+
 class SGN(nn.Module):
     def __init__(self, num_classes, dataset, seg, args, bias = True):
         super(SGN, self).__init__()
@@ -15,33 +36,61 @@ class SGN(nn.Module):
         self.use_velocity_stream = bool(getattr(args, 'use_velocity_stream', 1))
         self.use_acceleration_stream = bool(getattr(args, 'use_acceleration_stream', 1))
         self.use_angular_velocity_stream = bool(getattr(args, 'use_angular_velocity_stream', 1))
+        self.disentangle = bool(getattr(args, 'disentangle', 1))
+        self.grl_lambda = float(getattr(args, 'grl_lambda', 1.0))
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
         self.spa_embed = embed(num_joint, 64, norm=False, bias=bias)
         self.joint_embed = embed(3, 64, norm=True, bias=bias)
+        self.sta_joint_embed = embed(3, 64, norm=True, bias=bias)
         self.dif_embed = embed(3, 64, norm=True, bias=bias)
         self.acc_embed = embed(3, 64, norm=True, bias=bias)
         self.ang_embed = embed(3, 64, norm=True, bias=bias)
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
-        self.cnn = local(self.dim1, self.dim1 * 2, bias=bias)
-        self.compute_g1 = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
-        self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
-        self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
-        self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.cnn_dyn = local(self.dim1, self.dim1 * 2, bias=bias)
+        self.compute_g_dyn = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_dyn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
+        self.gcn_dyn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_dyn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.cnn_sta = local(self.dim1, self.dim1 * 2, bias=bias)
+        self.compute_g_sta = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_sta1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
+        self.gcn_sta2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_sta3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
+        self.sta_proxy_head = nn.Sequential(
+            nn.Linear(self.dim1 * 2, self.dim1),
+            nn.ReLU(),
+            nn.Linear(self.dim1, len(NTU_BONES))
+        )
+        self.dyn_adv_head = nn.Sequential(
+            nn.Linear(self.dim1 * 2, self.dim1),
+            nn.ReLU(),
+            nn.Linear(self.dim1, len(NTU_BONES))
+        )
+        self.swap_id_head = nn.Sequential(
+            nn.Linear(self.dim1 * 4, self.dim1 * 2),
+            nn.ReLU(),
+            nn.Linear(self.dim1 * 2, num_classes)
+        )
+        self.mse = nn.MSELoss()
+        self.kld = nn.KLDivLoss(reduction='batchmean')
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
                 m.weight.data.normal_(0, math.sqrt(2. / n))
 
-        nn.init.constant_(self.gcn1.w.cnn.weight, 0)
-        nn.init.constant_(self.gcn2.w.cnn.weight, 0)
-        nn.init.constant_(self.gcn3.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_dyn1.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_dyn2.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_dyn3.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_sta1.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_sta2.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_sta3.w.cnn.weight, 0)
 
 
-    def forward(self, input):
+    def forward(self, input, target=None):
         
         # Dynamic Representation
         bs, step, dim = input.size()
@@ -73,21 +122,60 @@ class SGN(nn.Module):
         if len(streams) == 0:
             streams.append(self.dif_embed(vel))
         dy = sum(streams) / len(streams)
-        # Joint-level Module
-        input= torch.cat([dy, spa1], 1)
-        g = self.compute_g1(input)
-        input = self.gcn1(input, g)
-        input = self.gcn2(input, g)
-        input = self.gcn3(input, g)
-        # Frame-level Module
-        input = input + tem1
-        input = self.cnn(input)
-        # Classification
-        output = self.maxpool(input)
-        output = torch.flatten(output, 1)
-        output = self.fc(output)
+        sta = input.mean(dim=-1, keepdim=True).expand(-1, -1, -1, step).contiguous()
+        sta = self.sta_joint_embed(sta)
+        dyn_feat = self._encode_branch(dy, spa1, tem1, self.compute_g_dyn, self.gcn_dyn1, self.gcn_dyn2, self.gcn_dyn3, self.cnn_dyn)
+        sta_feat = self._encode_branch(sta, spa1, tem1, self.compute_g_sta, self.gcn_sta1, self.gcn_sta2, self.gcn_sta3, self.cnn_sta)
+        id_logits = self.fc(dyn_feat)
 
-        return output
+        if (not self.disentangle) or (target is None):
+            return id_logits
+
+        bone_target = self._extract_bone_length_target(input)
+        sta_pred = self.sta_proxy_head(sta_feat)
+        sta_proxy_loss = self.mse(sta_pred, bone_target)
+        dyn_adv_in = grad_reverse(dyn_feat, self.grl_lambda)
+        dyn_adv_pred = self.dyn_adv_head(dyn_adv_in)
+        dyn_adv_loss = self.mse(dyn_adv_pred, bone_target)
+
+        perm = torch.randperm(bs, device=input.device)
+        swap_sta_feat = sta_feat[perm]
+        swap_input = torch.cat([dyn_feat, swap_sta_feat], dim=1)
+        swap_logits = self.swap_id_head(swap_input)
+        swap_id_loss = nn.functional.cross_entropy(swap_logits, target)
+        swap_consistency_loss = self.kld(
+            nn.functional.log_softmax(swap_logits, dim=1),
+            nn.functional.softmax(id_logits.detach(), dim=1)
+        )
+
+        return {
+            'id_logits': id_logits,
+            'sta_proxy_loss': sta_proxy_loss,
+            'dyn_adv_loss': dyn_adv_loss,
+            'swap_consistency_loss': swap_consistency_loss,
+            'swap_id_loss': swap_id_loss,
+            'swap_logits': swap_logits,
+        }
+
+    def _encode_branch(self, feat, spa1, tem1, compute_g, gcn1, gcn2, gcn3, cnn):
+        feat = torch.cat([feat, spa1], 1)
+        g = compute_g(feat)
+        feat = gcn1(feat, g)
+        feat = gcn2(feat, g)
+        feat = gcn3(feat, g)
+        feat = feat + tem1
+        feat = cnn(feat)
+        feat = self.maxpool(feat)
+        feat = torch.flatten(feat, 1)
+        return feat
+
+    def _extract_bone_length_target(self, input):
+        lengths = []
+        for parent, child in NTU_BONES:
+            vec = input[:, :, child, :] - input[:, :, parent, :]
+            lengths.append(torch.linalg.norm(vec, dim=1).mean(dim=-1))
+        lengths = torch.stack(lengths, dim=1)
+        return lengths
 
     def one_hot(self, bs, spa, tem):
 

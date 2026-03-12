@@ -42,6 +42,12 @@ parser.set_defaults(
     use_angular_velocity_stream=1,
     bone_length_scale_aug=1,
     bone_length_scale_range=0.15,
+    disentangle=1,
+    lambda_sta_proxy=1.0,
+    lambda_dyn_adv=0.5,
+    grl_lambda=1.0,
+    lambda_swap_consistency=0.1,
+    lambda_swap_id=0.1,
     )
 args = parser.parse_args()
 
@@ -158,17 +164,42 @@ def main():
 
 def train(train_loader, model, criterion, optimizer, epoch):
     losses = AverageMeter()
+    cls_losses = AverageMeter()
+    sta_losses = AverageMeter()
+    adv_losses = AverageMeter()
+    swap_cons_losses = AverageMeter()
+    swap_id_losses = AverageMeter()
     acces = AverageMeter()
     model.train()
 
     for i, (inputs, target) in enumerate(train_loader):
 
-        output = model(inputs.cuda())
+        output = model(inputs.cuda(), target.cuda(non_blocking=True) if args.disentangle else None)
         target = target.cuda(non_blocking=True)
-        loss = criterion(output, target)
+        if isinstance(output, dict):
+            logits = output['id_logits']
+            cls_loss = criterion(logits, target)
+            sta_loss = output['sta_proxy_loss']
+            adv_loss = output['dyn_adv_loss']
+            swap_consistency_loss = output['swap_consistency_loss']
+            swap_id_loss = output['swap_id_loss']
+            loss = cls_loss + \
+                   args.lambda_sta_proxy * sta_loss + \
+                   args.lambda_dyn_adv * adv_loss + \
+                   args.lambda_swap_consistency * swap_consistency_loss + \
+                   args.lambda_swap_id * swap_id_loss
+            cls_losses.update(cls_loss.item(), inputs.size(0))
+            sta_losses.update(sta_loss.item(), inputs.size(0))
+            adv_losses.update(adv_loss.item(), inputs.size(0))
+            swap_cons_losses.update(swap_consistency_loss.item(), inputs.size(0))
+            swap_id_losses.update(swap_id_loss.item(), inputs.size(0))
+        else:
+            logits = output
+            loss = criterion(logits, target)
+            cls_losses.update(loss.item(), inputs.size(0))
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target)
+        acc = accuracy(logits.data, target)
         losses.update(loss.item(), inputs.size(0))
         acces.update(acc[0], inputs.size(0))
 
@@ -178,10 +209,22 @@ def train(train_loader, model, criterion, optimizer, epoch):
         optimizer.step()
 
         if (i + 1) % args.print_freq == 0:
-            print('Epoch-{:<3d} {:3d} batches\t'
-                  'loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'accu {acc.val:.3f} ({acc.avg:.3f})'.format(
-                   epoch + 1, i + 1, loss=losses, acc=acces))
+            if args.disentangle:
+                print('Epoch-{:<3d} {:3d} batches\t'
+                      'loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'cls {cls.val:.4f} ({cls.avg:.4f})\t'
+                      'sta {sta.val:.4f} ({sta.avg:.4f})\t'
+                      'adv {adv.val:.4f} ({adv.avg:.4f})\t'
+                      'swc {swc.val:.4f} ({swc.avg:.4f})\t'
+                      'swi {swi.val:.4f} ({swi.avg:.4f})\t'
+                      'accu {acc.val:.3f} ({acc.avg:.3f})'.format(
+                       epoch + 1, i + 1, loss=losses, cls=cls_losses, sta=sta_losses,
+                       adv=adv_losses, swc=swap_cons_losses, swi=swap_id_losses, acc=acces))
+            else:
+                print('Epoch-{:<3d} {:3d} batches\t'
+                      'loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'accu {acc.val:.3f} ({acc.avg:.3f})'.format(
+                       epoch + 1, i + 1, loss=losses, acc=acces))
 
     return losses.avg, acces.avg
 
@@ -193,13 +236,24 @@ def validate(val_loader, model, criterion):
 
     for i, (inputs, target) in enumerate(val_loader):
         with torch.no_grad():
-            output = model(inputs.cuda())
+            output = model(inputs.cuda(), target.cuda(non_blocking=True) if args.disentangle else None)
         target = target.cuda(non_blocking=True)
-        with torch.no_grad():
-            loss = criterion(output, target)
+        if isinstance(output, dict):
+            logits = output['id_logits']
+            with torch.no_grad():
+                cls_loss = criterion(logits, target)
+                loss = cls_loss + \
+                       args.lambda_sta_proxy * output['sta_proxy_loss'] + \
+                       args.lambda_dyn_adv * output['dyn_adv_loss'] + \
+                       args.lambda_swap_consistency * output['swap_consistency_loss'] + \
+                       args.lambda_swap_id * output['swap_id_loss']
+        else:
+            logits = output
+            with torch.no_grad():
+                loss = criterion(logits, target)
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target)
+        acc = accuracy(logits.data, target)
         losses.update(loss.item(), inputs.size(0))
         acces.update(acc[0], inputs.size(0))
 
@@ -219,6 +273,8 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     for i, (inputs, target) in enumerate(test_loader):
         with torch.no_grad():
             output = model(inputs.cuda())
+            if isinstance(output, dict):
+                output = output['id_logits']
             output = output.view((-1, inputs.size(0)//target.size(0), output.size(1)))
             output = output.mean(1)
 

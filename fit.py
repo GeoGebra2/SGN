@@ -52,4 +52,16 @@ def add_fit_args(parser):
                       help='enable random bone-length scaling for train loader')
     args.add_argument('--bone-length-scale-range', type=float, default=0.15,
                       help='random scaling range for each bone')
+    args.add_argument('--disentangle', type=int, default=1,
+                      help='enable dynamic/static disentanglement training')
+    args.add_argument('--lambda-sta-proxy', type=float, default=1.0,
+                      help='weight for static proxy loss')
+    args.add_argument('--lambda-dyn-adv', type=float, default=0.5,
+                      help='weight for dynamic adversarial loss')
+    args.add_argument('--grl-lambda', type=float, default=1.0,
+                      help='gradient reversal strength for dynamic adversarial head')
+    args.add_argument('--lambda-swap-consistency', type=float, default=0.1,
+                      help='weight for static swap consistency loss')
+    args.add_argument('--lambda-swap-id', type=float, default=0.1,
+                      help='weight for swap-branch id loss')
     return args
