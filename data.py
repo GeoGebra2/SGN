@@ -30,11 +30,15 @@ class NTUDataset(Dataset):
         return [self.x[index], int(self.y[index])]
 
 class NTUDataLoaders(object):
-    def __init__(self, dataset ='NTU', case = 0, aug = 1, seg = 30):
+    def __init__(self, dataset ='NTU', case = 0, aug = 1, seg = 30, args=None):
         self.dataset = dataset
         self.case = case
         self.aug = aug
         self.seg = seg
+        self.normalize_bone_length = not (getattr(args, 'disable_bone_length_norm', False) if args is not None else False)
+        self.normalize_orientation = not (getattr(args, 'disable_orientation_norm', False) if args is not None else False)
+        self.bone_length_scale_aug = bool(getattr(args, 'bone_length_scale_aug', 0)) if args is not None else False
+        self.bone_length_scale_range = float(getattr(args, 'bone_length_scale_range', 0.15)) if args is not None else 0.15
         self.create_datasets()
         self.train_set = NTUDataset(self.train_X, self.train_Y)
         self.val_set = NTUDataset(self.val_X, self.val_Y)
@@ -137,6 +141,7 @@ class NTUDataLoaders(object):
 
         #### data augmentation
         x = _transform(x, theta)
+        x = self._preprocess_skeleton_batch(x, train=True)
         #### data augmentation
         y = torch.LongTensor(y)
 
@@ -152,6 +157,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = self._preprocess_skeleton_batch(x, train=False)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -167,6 +173,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = self._preprocess_skeleton_batch(x, train=False)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -219,6 +226,20 @@ class NTUDataLoaders(object):
 
         return seqs
 
+    def _preprocess_skeleton_batch(self, x, train=False):
+        x = x.contiguous().view(x.size(0), x.size(1), 25, 3)
+        root = x[:, :, 1:2, :]
+        x = x - root
+        if self.normalize_orientation:
+            x = _align_orientation_yaw(x)
+        if self.normalize_bone_length:
+            x = _normalize_bone_length_scale(x)
+        if train and self.bone_length_scale_aug:
+            x = _randomize_bone_lengths(x, self.bone_length_scale_range)
+        x = x.contiguous().view(x.size(0), x.size(1), -1)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        return x
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
     def __init__(self):
@@ -248,6 +269,64 @@ def turn_two_to_one(seq):
             new_seq.append(ske[0:75])
             new_seq.append(ske[75:])
     return np.array(new_seq)
+
+NTU_BONES = [
+    (0, 1), (1, 20), (20, 2), (2, 3),
+    (20, 4), (4, 5), (5, 6), (6, 7), (7, 21), (7, 22),
+    (20, 8), (8, 9), (9, 10), (10, 11), (11, 23), (11, 24),
+    (0, 12), (12, 13), (13, 14), (14, 15),
+    (0, 16), (16, 17), (17, 18), (18, 19)
+]
+
+NTU_BONE_TREE = [
+    (0, 1), (1, 20), (20, 2), (2, 3),
+    (20, 4), (4, 5), (5, 6), (6, 7), (7, 21), (7, 22),
+    (20, 8), (8, 9), (9, 10), (10, 11), (11, 23), (11, 24),
+    (0, 12), (12, 13), (13, 14), (14, 15),
+    (0, 16), (16, 17), (17, 18), (18, 19)
+]
+
+def _align_orientation_yaw(x):
+    left_shoulder = x[:, :, 4, :]
+    right_shoulder = x[:, :, 8, :]
+    left_hip = x[:, :, 12, :]
+    right_hip = x[:, :, 16, :]
+    horizontal = (right_shoulder - left_shoulder + right_hip - left_hip) * 0.5
+    horizontal = horizontal.mean(dim=1)
+    yaw = -torch.atan2(horizontal[:, 2], horizontal[:, 0])
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+    rot = x.new_zeros((x.size(0), 3, 3))
+    rot[:, 0, 0] = cos_yaw
+    rot[:, 0, 2] = sin_yaw
+    rot[:, 1, 1] = 1.0
+    rot[:, 2, 0] = -sin_yaw
+    rot[:, 2, 2] = cos_yaw
+    x = torch.einsum('btjc,bck->btjk', x, rot)
+    return x
+
+def _normalize_bone_length_scale(x, eps=1e-6):
+    lengths = []
+    for parent, child in NTU_BONES:
+        vec = x[:, :, child, :] - x[:, :, parent, :]
+        lengths.append(torch.linalg.norm(vec, dim=-1))
+    lengths = torch.stack(lengths, dim=-1)
+    scale = lengths.mean(dim=(1, 2), keepdim=True).clamp_min(eps)
+    x = x / scale.unsqueeze(-1)
+    return x
+
+def _randomize_bone_lengths(x, scale_range=0.15):
+    if scale_range <= 0:
+        return x
+    low = 1.0 - scale_range
+    high = 1.0 + scale_range
+    factors = x.new_empty((x.size(0), len(NTU_BONE_TREE))).uniform_(low, high)
+    out = x.clone()
+    for i, (parent, child) in enumerate(NTU_BONE_TREE):
+        vec = x[:, :, child, :] - x[:, :, parent, :]
+        factor = factors[:, i].view(-1, 1, 1)
+        out[:, :, child, :] = out[:, :, parent, :] + factor * vec
+    return out
 
 def _rot(rot):
     cos_r, sin_r = rot.cos(), rot.sin()

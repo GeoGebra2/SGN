@@ -11,12 +11,18 @@ class SGN(nn.Module):
         self.dim1 = 256
         self.dataset = dataset
         self.seg = seg
+        self.use_position_stream = bool(getattr(args, 'use_position_stream', 0))
+        self.use_velocity_stream = bool(getattr(args, 'use_velocity_stream', 1))
+        self.use_acceleration_stream = bool(getattr(args, 'use_acceleration_stream', 1))
+        self.use_angular_velocity_stream = bool(getattr(args, 'use_angular_velocity_stream', 1))
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
         self.spa_embed = embed(num_joint, 64, norm=False, bias=bias)
         self.joint_embed = embed(3, 64, norm=True, bias=bias)
         self.dif_embed = embed(3, 64, norm=True, bias=bias)
+        self.acc_embed = embed(3, 64, norm=True, bias=bias)
+        self.ang_embed = embed(3, 64, norm=True, bias=bias)
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.cnn = local(self.dim1, self.dim1 * 2, bias=bias)
         self.compute_g1 = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
@@ -42,15 +48,31 @@ class SGN(nn.Module):
         num_joints = dim //3
         input = input.view((bs, step, num_joints, 3))
         input = input.permute(0, 3, 2, 1).contiguous()
-        dif = input[:, :, :, 1:] - input[:, :, :, 0:-1]
-        dif = torch.cat([dif.new(bs, dif.size(1), num_joints, 1).zero_(), dif], dim=-1)
-        pos = self.joint_embed(input)
+        vel = input[:, :, :, 1:] - input[:, :, :, 0:-1]
+        vel = torch.cat([vel.new(bs, vel.size(1), num_joints, 1).zero_(), vel], dim=-1)
+        acc = vel[:, :, :, 1:] - vel[:, :, :, 0:-1]
+        acc = torch.cat([acc.new(bs, acc.size(1), num_joints, 1).zero_(), acc], dim=-1)
+        rel = input - input[:, :, 1:2, :]
+        rel_norm = torch.linalg.norm(rel, dim=1, keepdim=True).clamp_min(1e-6)
+        rel_unit = rel / rel_norm
+        ang = torch.cross(rel_unit[:, :, :, 0:-1], rel_unit[:, :, :, 1:], dim=1)
+        ang = torch.cat([ang.new(bs, ang.size(1), num_joints, 1).zero_(), ang], dim=-1)
         spa = self.one_hot(bs, num_joints, step).permute(0, 3, 2, 1).to(input.device)
         tem = self.one_hot(bs, step, num_joints).permute(0, 3, 1, 2).to(input.device)
         tem1 = self.tem_embed(tem)
         spa1 = self.spa_embed(spa)
-        dif = self.dif_embed(dif)
-        dy = pos + dif
+        streams = []
+        if self.use_position_stream:
+            streams.append(self.joint_embed(input))
+        if self.use_velocity_stream:
+            streams.append(self.dif_embed(vel))
+        if self.use_acceleration_stream:
+            streams.append(self.acc_embed(acc))
+        if self.use_angular_velocity_stream:
+            streams.append(self.ang_embed(ang))
+        if len(streams) == 0:
+            streams.append(self.dif_embed(vel))
+        dy = sum(streams) / len(streams)
         # Joint-level Module
         input= torch.cat([dy, spa1], 1)
         g = self.compute_g1(input)

@@ -36,5 +36,20 @@ def add_fit_args(parser):
                       help='quantity to monitor (default: val_acc)')
     args.add_argument('--seg', type=int, default=20,
                       help='number of segmentation')
+    args.add_argument('--use-position-stream', type=int, default=0,
+                      help='use position embedding stream')
+    args.add_argument('--use-velocity-stream', type=int, default=1,
+                      help='use velocity embedding stream')
+    args.add_argument('--use-acceleration-stream', type=int, default=1,
+                      help='use acceleration embedding stream')
+    args.add_argument('--use-angular-velocity-stream', type=int, default=1,
+                      help='use angular velocity embedding stream')
+    args.add_argument('--disable-bone-length-norm', action='store_true',
+                      help='disable bone-length normalization')
+    args.add_argument('--disable-orientation-norm', action='store_true',
+                      help='disable orientation normalization')
+    args.add_argument('--bone-length-scale-aug', type=int, default=1,
+                      help='enable random bone-length scaling for train loader')
+    args.add_argument('--bone-length-scale-range', type=float, default=0.15,
+                      help='random scaling range for each bone')
     return args
-

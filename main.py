@@ -36,6 +36,12 @@ parser.set_defaults(
     print_freq = 20,
     train = 0,
     seg = 20,
+    use_position_stream=0,
+    use_velocity_stream=1,
+    use_acceleration_stream=1,
+    use_angular_velocity_stream=1,
+    bone_length_scale_aug=1,
+    bone_length_scale_range=0.15,
     )
 args = parser.parse_args()
 
@@ -69,7 +75,7 @@ def main():
 
     scheduler = MultiStepLR(optimizer, milestones=[60, 90, 110], gamma=0.1)
     # Data loading
-    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg)
+    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
     train_loader = ntu_loaders.get_train_loader(args.batch_size, args.workers)
     val_loader = ntu_loaders.get_val_loader(args.batch_size, args.workers)
     train_size = ntu_loaders.get_train_size()
