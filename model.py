@@ -11,12 +11,14 @@ class SGN(nn.Module):
         self.dim1 = 256
         self.dataset = dataset
         self.seg = seg
+        self.motion_only = getattr(args, "motion_only", False)
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
         self.spa_embed = embed(num_joint, 64, norm=False, bias=bias)
         self.joint_embed = embed(3, 64, norm=True, bias=bias)
         self.dif_embed = embed(3, 64, norm=True, bias=bias)
+        self.acc_embed = embed(3, 64, norm=True, bias=bias)
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.cnn = local(self.dim1, self.dim1 * 2, bias=bias)
         self.compute_g1 = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
@@ -44,13 +46,20 @@ class SGN(nn.Module):
         input = input.permute(0, 3, 2, 1).contiguous()
         dif = input[:, :, :, 1:] - input[:, :, :, 0:-1]
         dif = torch.cat([dif.new(bs, dif.size(1), num_joints, 1).zero_(), dif], dim=-1)
-        pos = self.joint_embed(input)
+        dif_raw = dif
         spa = self.one_hot(bs, num_joints, step).permute(0, 3, 2, 1).to(input.device)
         tem = self.one_hot(bs, step, num_joints).permute(0, 3, 1, 2).to(input.device)
         tem1 = self.tem_embed(tem)
         spa1 = self.spa_embed(spa)
         dif = self.dif_embed(dif)
-        dy = pos + dif
+        if self.motion_only:
+            acc = dif_raw[:, :, :, 1:] - dif_raw[:, :, :, 0:-1]
+            acc = torch.cat([acc.new(bs, acc.size(1), num_joints, 1).zero_(), acc], dim=-1)
+            acc = self.acc_embed(acc)
+            dy = dif + acc
+        else:
+            pos = self.joint_embed(input)
+            dy = pos + dif
         # Joint-level Module
         input= torch.cat([dy, spa1], 1)
         g = self.compute_g1(input)

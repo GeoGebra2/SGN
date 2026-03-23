@@ -36,5 +36,6 @@ def add_fit_args(parser):
                       help='quantity to monitor (default: val_acc)')
     args.add_argument('--seg', type=int, default=20,
                       help='number of segmentation')
+    args.add_argument('--motion-only', action='store_true',
+                      help='use motion-only input (velocity/acceleration)')
     return args
-
