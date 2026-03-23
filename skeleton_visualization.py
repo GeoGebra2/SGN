@@ -20,7 +20,7 @@ args.use_angular_velocity_stream = 1
 args.disentangle = 1
 args.grl_lambda = 1.0
 
-num_classes = 60
+num_classes = 40
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 model = SGN(num_classes, args.dataset, args.seg, args).to(device).eval()
