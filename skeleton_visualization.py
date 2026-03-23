@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 
 from model import SGN
 from data import NTUDataLoaders
+from util import get_num_classes
 
 args = type('A', (), {})()
 args.dataset = 'NTU_ID'
@@ -20,16 +21,26 @@ args.use_angular_velocity_stream = 1
 args.disentangle = 1
 args.grl_lambda = 1.0
 
-num_classes = 40
+num_classes = get_num_classes(args.dataset)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 model = SGN(num_classes, args.dataset, args.seg, args).to(device).eval()
 ckpt = 'results/NTU_ID/SGN/0_best.pth'
-sd = torch.load(ckpt)
-model.load_state_dict(sd['state_dict'] if 'state_dict' in sd else sd)
+try:
+    sd = torch.load(ckpt, weights_only=True)
+except TypeError:
+    sd = torch.load(ckpt)
+state = sd['state_dict'] if 'state_dict' in sd else sd
+try:
+    model.load_state_dict(state)
+except RuntimeError:
+    model.load_state_dict(state, strict=False)
 
 def get_loader(dataset):
-    loaders = NTUDataLoaders(dataset=dataset, case=args.case, seg=args.seg, args=args)
+    try:
+        loaders = NTUDataLoaders(dataset=dataset, case=args.case, seg=args.seg, args=args)
+    except TypeError:
+        loaders = NTUDataLoaders(dataset=dataset, case=args.case, seg=args.seg)
     return loaders.get_val_loader(batch_size=64, num_workers=16)
 
 buf = {}
