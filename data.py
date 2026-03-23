@@ -29,6 +29,62 @@ class NTUDataset(Dataset):
     def __getitem__(self, index):
         return [self.x[index], int(self.y[index])]
 
+class NTUPairDataset(Dataset):
+    def __init__(self, x, y, mode='train', pairs_per_label=1, seed=1337):
+        self.x = x
+        self.y = np.array(y, dtype='int')
+        self.mode = mode
+        self.pairs_per_label = pairs_per_label
+        self.rng = np.random.RandomState(seed)
+        self.label_to_indices = {}
+        for idx, label in enumerate(self.y):
+            self.label_to_indices.setdefault(label, []).append(idx)
+        self.labels = list(self.label_to_indices.keys())
+        self.pairs = None
+        if mode != 'train':
+            self.pairs = self._build_pairs()
+
+    def _build_pairs(self):
+        pairs = []
+        for label, indices in self.label_to_indices.items():
+            if len(indices) < 2:
+                continue
+            for i in range(min(self.pairs_per_label, len(indices) - 1)):
+                a = indices[i]
+                b = indices[i + 1]
+                pairs.append((a, b, 1))
+        neg_needed = len(pairs)
+        if neg_needed == 0:
+            return pairs
+        for _ in range(neg_needed):
+            la, lb = self.rng.choice(self.labels, 2, replace=False)
+            ia = self.rng.choice(self.label_to_indices[la])
+            ib = self.rng.choice(self.label_to_indices[lb])
+            pairs.append((ia, ib, 0))
+        return pairs
+
+    def __len__(self):
+        if self.mode == 'train':
+            return len(self.y)
+        return len(self.pairs)
+
+    def __getitem__(self, index):
+        if self.mode == 'train':
+            idx1 = index
+            label1 = self.y[idx1]
+            if len(self.label_to_indices[label1]) > 1 and random.random() < 0.5:
+                idx2 = idx1
+                while idx2 == idx1:
+                    idx2 = random.choice(self.label_to_indices[label1])
+                same = 1
+            else:
+                label2 = random.choice([l for l in self.labels if l != label1])
+                idx2 = random.choice(self.label_to_indices[label2])
+                same = 0
+            return [self.x[idx1], self.x[idx2], same]
+        idx1, idx2, same = self.pairs[index]
+        return [self.x[idx1], self.x[idx2], same]
+
 class NTUDataLoaders(object):
     def __init__(self, dataset ='NTU', case = 0, aug = 1, seg = 30):
         self.dataset = dataset
@@ -65,6 +121,24 @@ class NTUDataLoaders(object):
         return DataLoader(self.test_set, batch_size=batch_size,
                           shuffle=False, num_workers=num_workers,
                           collate_fn=self.collate_fn_fix_test, pin_memory=True, drop_last=False)
+
+    def get_pair_train_loader(self, batch_size, num_workers):
+        pair_set = NTUPairDataset(self.train_X, self.train_Y, mode='train')
+        return DataLoader(pair_set, batch_size=batch_size,
+                          shuffle=True, num_workers=num_workers,
+                          collate_fn=self.collate_fn_pair_train, pin_memory=True, drop_last=True)
+
+    def get_pair_val_loader(self, batch_size, num_workers):
+        pair_set = NTUPairDataset(self.val_X, self.val_Y, mode='val')
+        return DataLoader(pair_set, batch_size=batch_size,
+                          shuffle=False, num_workers=num_workers,
+                          collate_fn=self.collate_fn_pair_val, pin_memory=True, drop_last=False)
+
+    def get_pair_test_loader(self, batch_size, num_workers):
+        pair_set = NTUPairDataset(self.test_X, self.test_Y, mode='test')
+        return DataLoader(pair_set, batch_size=batch_size,
+                          shuffle=False, num_workers=num_workers,
+                          collate_fn=self.collate_fn_pair_val, pin_memory=True, drop_last=False)
 
     def get_train_size(self):
         return len(self.train_Y)
@@ -134,6 +208,8 @@ class NTUDataLoaders(object):
                 theta = 0.5
         elif self.dataset == 'NTU120':
             theta = 0.3
+        else:
+            theta = 0.3
 
         #### data augmentation
         x = _transform(x, theta)
@@ -170,6 +246,45 @@ class NTUDataLoaders(object):
         y = torch.LongTensor(y)
 
         return [x, y]
+
+    def collate_fn_pair_train(self, batch):
+        x1, x2, y = zip(*batch)
+        x1, _ = self.Tolist_fix(x1, y, train=1)
+        x2, _ = self.Tolist_fix(x2, y, train=1)
+        lens = np.array([x_.shape[0] for x_ in x1], dtype=int)
+        idx = lens.argsort()[::-1]
+        x1 = torch.stack([torch.from_numpy(x1[i]) for i in idx], 0)
+        x2 = torch.stack([torch.from_numpy(x2[i]) for i in idx], 0)
+        x1 = torch.nan_to_num(x1, nan=0.0, posinf=0.0, neginf=0.0)
+        x2 = torch.nan_to_num(x2, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.dataset == 'NTU':
+            if self.case == 0:
+                theta = 0.3
+            elif self.case == 1:
+                theta = 0.5
+        elif self.dataset == 'NTU_ID':
+            if self.case == 0:
+                theta = 0.3
+            elif self.case == 1:
+                theta = 0.5
+        elif self.dataset == 'NTU120':
+            theta = 0.3
+        x1 = _transform(x1, theta)
+        x2 = _transform(x2, theta)
+        y = torch.FloatTensor(np.array(y)[idx])
+        return [x1, x2, y]
+
+    def collate_fn_pair_val(self, batch):
+        x1, x2, y = zip(*batch)
+        x1, _ = self.Tolist_fix(x1, y, train=1)
+        x2, _ = self.Tolist_fix(x2, y, train=1)
+        idx = range(len(x1))
+        x1 = torch.stack([torch.from_numpy(x1[i]) for i in idx], 0)
+        x2 = torch.stack([torch.from_numpy(x2[i]) for i in idx], 0)
+        x1 = torch.nan_to_num(x1, nan=0.0, posinf=0.0, neginf=0.0)
+        x2 = torch.nan_to_num(x2, nan=0.0, posinf=0.0, neginf=0.0)
+        y = torch.FloatTensor(np.array(y))
+        return [x1, x2, y]
 
     def Tolist_fix(self, joints, y, train = 1):
         seqs = []

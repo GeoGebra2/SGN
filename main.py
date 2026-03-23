@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, MultiStepLR
-from model import SGN
+from model import SGN, SGNPair
 from data import NTUDataLoaders, AverageMeter
 import fit
 from util import make_dir, get_num_classes
@@ -40,9 +40,11 @@ parser.set_defaults(
 args = parser.parse_args()
 
 def main():
-
-    args.num_classes = get_num_classes(args.dataset)
-    model = SGN(args.num_classes, args.dataset, args.seg, args)
+    if args.task == 'pair':
+        model = SGNPair(args.dataset, args.seg, args)
+    else:
+        args.num_classes = get_num_classes(args.dataset)
+        model = SGN(args.num_classes, args.dataset, args.seg, args)
 
     total = get_n_params(model)
     print(model)
@@ -53,7 +55,10 @@ def main():
         print('It is using GPU!')
         model = model.cuda()
 
-    criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
+    if args.task == 'pair':
+        criterion = nn.BCEWithLogitsLoss().cuda()
+    else:
+        criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.monitor == 'val_acc':
@@ -70,13 +75,18 @@ def main():
     scheduler = MultiStepLR(optimizer, milestones=[60, 90, 110], gamma=0.1)
     # Data loading
     ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg)
-    train_loader = ntu_loaders.get_train_loader(args.batch_size, args.workers)
-    val_loader = ntu_loaders.get_val_loader(args.batch_size, args.workers)
-    train_size = ntu_loaders.get_train_size()
-    val_size = ntu_loaders.get_val_size()
-
-
-    test_loader = ntu_loaders.get_test_loader(32, args.workers)
+    if args.task == 'pair':
+        train_loader = ntu_loaders.get_pair_train_loader(args.batch_size, args.workers)
+        val_loader = ntu_loaders.get_pair_val_loader(args.batch_size, args.workers)
+        train_size = ntu_loaders.get_train_size()
+        val_size = ntu_loaders.get_val_size()
+        test_loader = ntu_loaders.get_pair_test_loader(32, args.workers)
+    else:
+        train_loader = ntu_loaders.get_train_loader(args.batch_size, args.workers)
+        val_loader = ntu_loaders.get_val_loader(args.batch_size, args.workers)
+        train_size = ntu_loaders.get_train_size()
+        val_size = ntu_loaders.get_val_size()
+        test_loader = ntu_loaders.get_test_loader(32, args.workers)
 
     print('Train on %d samples, validate on %d samples' % (train_size, val_size))
 
@@ -102,8 +112,12 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc = validate(val_loader, model, criterion)
+            if args.task == 'pair':
+                train_loss, train_acc = train_pair(train_loader, model, criterion, optimizer, epoch)
+                val_loss, val_acc = validate_pair(val_loader, model, criterion)
+            else:
+                train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch)
+                val_loss, val_acc = validate(val_loader, model, criterion)
             log_res += [[train_loss, float(train_acc),\
                          val_loss, float(val_acc)]]
 
@@ -145,9 +159,13 @@ def main():
 
     ### Test
     args.train = 0
-    model = SGN(args.num_classes, args.dataset, args.seg, args)
-    model = model.cuda()
-    test(test_loader, model, checkpoint, lable_path, pred_path)
+    if args.task == 'pair':
+        model = SGNPair(args.dataset, args.seg, args).cuda()
+        test_pair(test_loader, model, checkpoint, lable_path, pred_path)
+    else:
+        model = SGN(args.num_classes, args.dataset, args.seg, args)
+        model = model.cuda()
+        test(test_loader, model, checkpoint, lable_path, pred_path)
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -179,6 +197,27 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     return losses.avg, acces.avg
 
+def train_pair(train_loader, model, criterion, optimizer, epoch):
+    losses = AverageMeter()
+    acces = AverageMeter()
+    model.train()
+    for i, (x1, x2, target) in enumerate(train_loader):
+        output = model(x1.cuda(), x2.cuda())
+        target = target.cuda(non_blocking=True)
+        loss = criterion(output, target)
+        acc = accuracy_pair(output.data, target)
+        losses.update(loss.item(), x1.size(0))
+        acces.update(acc, x1.size(0))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if (i + 1) % args.print_freq == 0:
+            print('Epoch-{:<3d} {:3d} batches\t'
+                  'loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'accu {acc.val:.3f} ({acc.avg:.3f})'.format(
+                   epoch + 1, i + 1, loss=losses, acc=acces))
+    return losses.avg, acces.avg
+
 
 def validate(val_loader, model, criterion):
     losses = AverageMeter()
@@ -197,6 +236,21 @@ def validate(val_loader, model, criterion):
         losses.update(loss.item(), inputs.size(0))
         acces.update(acc[0], inputs.size(0))
 
+    return losses.avg, acces.avg
+
+def validate_pair(val_loader, model, criterion):
+    losses = AverageMeter()
+    acces = AverageMeter()
+    model.eval()
+    for i, (x1, x2, target) in enumerate(val_loader):
+        with torch.no_grad():
+            output = model(x1.cuda(), x2.cuda())
+        target = target.cuda(non_blocking=True)
+        with torch.no_grad():
+            loss = criterion(output, target)
+        acc = accuracy_pair(output.data, target)
+        losses.update(loss.item(), x1.size(0))
+        acces.update(acc, x1.size(0))
     return losses.avg, acces.avg
 
 
@@ -231,6 +285,27 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     print('Test: accuracy {:.3f}, time: {:.2f}s'
           .format(acces.avg, time.time() - t_start))
 
+def test_pair(test_loader, model, checkpoint, lable_path, pred_path):
+    acces = AverageMeter()
+    model.load_state_dict(torch.load(checkpoint)['state_dict'])
+    model.eval()
+    label_output = list()
+    pred_output = list()
+    t_start = time.time()
+    for i, (x1, x2, target) in enumerate(test_loader):
+        with torch.no_grad():
+            output = model(x1.cuda(), x2.cuda())
+        label_output.append(target.cpu().numpy())
+        pred_output.append(torch.sigmoid(output).cpu().numpy())
+        acc = accuracy_pair(output.data, target.cuda(non_blocking=True))
+        acces.update(acc, x1.size(0))
+    label_output = np.concatenate(label_output, axis=0)
+    np.savetxt(lable_path, label_output, fmt='%d')
+    pred_output = np.concatenate(pred_output, axis=0)
+    np.savetxt(pred_path, pred_output, fmt='%f')
+    print('Test: accuracy {:.3f}, time: {:.2f}s'
+          .format(acces.avg, time.time() - t_start))
+
 
 def accuracy(output, target):
     batch_size = target.size(0)
@@ -240,6 +315,11 @@ def accuracy(output, target):
     correct = correct.view(-1).float().sum(0, keepdim=True)
 
     return correct.mul_(100.0 / batch_size)
+
+def accuracy_pair(output, target):
+    pred = (torch.sigmoid(output) > 0.5).float()
+    correct = (pred == target).float().sum().item()
+    return 100.0 * correct / target.numel()
 
 def save_checkpoint(state, filename='checkpoint.pth.tar', is_best=False):
     torch.save(state, filename)

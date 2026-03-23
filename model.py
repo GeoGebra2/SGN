@@ -35,8 +35,7 @@ class SGN(nn.Module):
         nn.init.constant_(self.gcn3.w.cnn.weight, 0)
 
 
-    def forward(self, input):
-        
+    def forward_features(self, input):
         # Dynamic Representation
         bs, step, dim = input.size()
         num_joints = dim //3
@@ -63,8 +62,11 @@ class SGN(nn.Module):
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
-        output = self.fc(output)
+        return output
 
+    def forward(self, input):
+        output = self.forward_features(input)
+        output = self.fc(output)
         return output
 
     def one_hot(self, bs, spa, tem):
@@ -182,4 +184,21 @@ class compute_g_spa(nn.Module):
         g3 = g1.matmul(g2)
         g = self.softmax(g3)
         return g
+
+class SGNPair(nn.Module):
+    def __init__(self, dataset, seg, args, bias=True):
+        super(SGNPair, self).__init__()
+        self.backbone = SGN(1, dataset, seg, args, bias=bias)
+        self.head = nn.Sequential(
+            nn.Linear(self.backbone.dim1 * 2, self.backbone.dim1),
+            nn.ReLU(),
+            nn.Linear(self.backbone.dim1, 1),
+        )
+
+    def forward(self, x1, x2):
+        f1 = self.backbone.forward_features(x1)
+        f2 = self.backbone.forward_features(x2)
+        diff = torch.abs(f1 - f2)
+        out = self.head(diff)
+        return out.squeeze(1)
     

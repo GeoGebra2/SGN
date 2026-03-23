@@ -10,6 +10,8 @@ def add_fit_args(parser):
                       help='the neural network to use')
     args.add_argument('--dataset', type=str, default='NTU',
                       help='select dataset to evlulate')
+    args.add_argument('--task', type=str, default='classify',
+                      help='classify or pair')
     args.add_argument('--start-epoch', default=0, type=int,
                       help='manual epoch number (useful on restarts)')
     args.add_argument('--max-epoches', type=int, default=150,
@@ -37,4 +39,3 @@ def add_fit_args(parser):
     args.add_argument('--seg', type=int, default=20,
                       help='number of segmentation')
     return args
-
