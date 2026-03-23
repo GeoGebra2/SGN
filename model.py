@@ -21,6 +21,7 @@ class SGN(nn.Module):
         self.acc_embed = embed(3, 64, norm=True, bias=bias)
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.cnn = local(self.dim1, self.dim1 * 2, bias=bias)
+        self.temporal = temporal_stack(self.dim1 * 2, bias=bias)
         self.compute_g1 = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
@@ -69,6 +70,7 @@ class SGN(nn.Module):
         # Frame-level Module
         input = input + tem1
         input = self.cnn(input)
+        input = self.temporal(input)
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
@@ -156,6 +158,35 @@ class local(nn.Module):
         x = self.bn2(x)
         x = self.relu(x)
 
+        return x
+
+class temporal_block(nn.Module):
+    def __init__(self, dim, dilation=1, bias=False):
+        super(temporal_block, self).__init__()
+        self.cnn = nn.Conv2d(dim, dim, kernel_size=(1, 3), padding=(0, dilation), dilation=(1, dilation), bias=bias)
+        self.bn = nn.BatchNorm2d(dim)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout2d(0.2)
+
+    def forward(self, x):
+        x = self.cnn(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        return x
+
+class temporal_stack(nn.Module):
+    def __init__(self, dim, bias=False):
+        super(temporal_stack, self).__init__()
+        self.blocks = nn.ModuleList([
+            temporal_block(dim, dilation=1, bias=bias),
+            temporal_block(dim, dilation=2, bias=bias),
+            temporal_block(dim, dilation=4, bias=bias),
+        ])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = x + block(x)
         return x
 
 class gcn_spa(nn.Module):
