@@ -13,6 +13,7 @@ np.random.seed(1337)
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, MultiStepLR
 from model import SGN
@@ -157,9 +158,14 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     for i, (inputs, target) in enumerate(train_loader):
 
-        output = model(inputs.cuda())
+        inputs = inputs.cuda()
+        feats = model.forward_features(inputs)
+        output = model.fc(feats)
         target = target.cuda(non_blocking=True)
         loss = criterion(output, target)
+        if args.metric_loss != 'none':
+            metric = metric_loss(feats, target, args)
+            loss = loss + args.metric_weight * metric
 
         # measure accuracy and record loss
         acc = accuracy(output.data, target)
@@ -167,7 +173,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
         acces.update(acc[0], inputs.size(0))
 
         # backward
-        optimizer.zero_grad()  # clear gradients out before each mini-batch
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
@@ -271,6 +277,48 @@ class LabelSmoothingLoss(nn.Module):
             true_dist.fill_(self.smoothing / (self.cls - 1))
             true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+
+def metric_loss(feats, labels, args):
+    if args.metric_loss == 'supcon':
+        return supcon_loss(feats, labels, args.supcon_temp)
+    if args.metric_loss == 'triplet':
+        return batch_hard_triplet(feats, labels, args.triplet_margin)
+    return feats.sum() * 0.0
+
+def supcon_loss(feats, labels, temperature):
+    feats = F.normalize(feats, dim=1)
+    labels = labels.contiguous().view(-1, 1)
+    mask = torch.eq(labels, labels.T).float()
+    logits = torch.matmul(feats, feats.T) / temperature
+    logits = logits - torch.max(logits, dim=1, keepdim=True)[0].detach()
+    logits_mask = torch.ones_like(mask) - torch.eye(mask.size(0), device=mask.device)
+    mask = mask * logits_mask
+    exp_logits = torch.exp(logits) * logits_mask
+    log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
+    mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-12)
+    loss = -mean_log_prob_pos
+    loss = loss[torch.isfinite(loss)]
+    if loss.numel() == 0:
+        return feats.sum() * 0.0
+    return loss.mean()
+
+def batch_hard_triplet(feats, labels, margin):
+    feats = F.normalize(feats, dim=1)
+    dist = 1.0 - torch.matmul(feats, feats.T)
+    labels = labels.view(-1, 1)
+    mask_pos = torch.eq(labels, labels.T)
+    mask_neg = ~mask_pos
+    mask_pos = mask_pos.float()
+    mask_neg = mask_neg.float()
+    dist_ap = dist * mask_pos
+    dist_an = dist + (1.0 - mask_neg) * 1e6
+    hardest_pos, _ = dist_ap.max(dim=1)
+    hardest_neg, _ = dist_an.min(dim=1)
+    valid = mask_pos.sum(dim=1) > 1
+    if valid.sum() == 0:
+        return feats.sum() * 0.0
+    loss = F.relu(hardest_pos[valid] - hardest_neg[valid] + margin)
+    return loss.mean()
 
 if __name__ == '__main__':
     main()

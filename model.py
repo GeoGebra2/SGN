@@ -39,7 +39,7 @@ class SGN(nn.Module):
         nn.init.constant_(self.gcn3.w.cnn.weight, 0)
 
 
-    def forward(self, input):
+    def forward_features(self, input):
         
         # Dynamic Representation
         bs, step, dim = input.size()
@@ -76,8 +76,11 @@ class SGN(nn.Module):
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
-        output = self.fc(output)
+        return output
 
+    def forward(self, input):
+        output = self.forward_features(input)
+        output = self.fc(output)
         return output
 
     def one_hot(self, bs, spa, tem):
