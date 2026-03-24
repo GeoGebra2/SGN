@@ -22,6 +22,7 @@ class SGN(nn.Module):
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
         self.cnn = local(self.dim1, self.dim1 * 2, bias=bias)
         self.temporal = temporal_stack(self.dim1 * 2, bias=bias)
+        self.temporal_att = temporal_attention(self.dim1 * 2, bias=bias)
         self.compute_g1 = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
@@ -71,6 +72,7 @@ class SGN(nn.Module):
         input = input + tem1
         input = self.cnn(input)
         input = self.temporal(input)
+        input = self.temporal_att(input)
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
@@ -182,11 +184,27 @@ class temporal_stack(nn.Module):
             temporal_block(dim, dilation=1, bias=bias),
             temporal_block(dim, dilation=2, bias=bias),
             temporal_block(dim, dilation=4, bias=bias),
+            temporal_block(dim, dilation=8, bias=bias),
         ])
 
     def forward(self, x):
         for block in self.blocks:
             x = x + block(x)
+        return x
+
+class temporal_attention(nn.Module):
+    def __init__(self, dim, reduction=4, bias=False):
+        super(temporal_attention, self).__init__()
+        hidden = max(1, dim // reduction)
+        self.fc1 = nn.Conv1d(dim, hidden, kernel_size=1, bias=bias)
+        self.fc2 = nn.Conv1d(hidden, dim, kernel_size=1, bias=bias)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x_t = x.mean(dim=2)
+        att = self.fc2(self.relu(self.fc1(x_t)))
+        att = torch.softmax(att, dim=-1)
+        x = x * att.unsqueeze(2)
         return x
 
 class gcn_spa(nn.Module):
