@@ -1,56 +1,32 @@
-import os
+import argparse
 import torch
 import numpy as np
 from sklearn.manifold import TSNE
-from sklearn.metrics import silhouette_score
-from sklearn.neighbors import KNeighborsClassifier
 import matplotlib.pyplot as plt
 
 from model import SGN
 from data import NTUDataLoaders
 from util import get_num_classes
 
-args = type('A', (), {})()
-args.dataset = 'NTU_ID'
-args.case = 0
-args.seg = 20
-args.use_position_stream = 0
-args.use_velocity_stream = 1
-args.use_acceleration_stream = 1
-args.use_angular_velocity_stream = 1
-args.disentangle = 1
-args.grl_lambda = 1.0
-
-num_classes = get_num_classes(args.dataset)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-model = SGN(num_classes, args.dataset, args.seg, args).to(device).eval()
-ckpt = 'results/NTU_ID/SGN/0_best.pth'
-try:
-    sd = torch.load(ckpt, weights_only=True)
-except TypeError:
-    sd = torch.load(ckpt)
-state = sd['state_dict'] if 'state_dict' in sd else sd
-try:
-    model.load_state_dict(state)
-except RuntimeError:
-    model.load_state_dict(state, strict=False)
-
-def get_loader(dataset):
+def get_loader(args, split):
     try:
-        loaders = NTUDataLoaders(dataset=dataset, case=args.case, seg=args.seg, args=args)
+        loaders = NTUDataLoaders(dataset=args.dataset, case=args.case, seg=args.seg, args=args)
     except TypeError:
-        loaders = NTUDataLoaders(dataset=dataset, case=args.case, seg=args.seg)
-    return loaders.get_val_loader(batch_size=64, num_workers=16)
+        loaders = NTUDataLoaders(dataset=args.dataset, case=args.case, seg=args.seg)
+    if split == "train":
+        return loaders.get_train_loader(batch_size=args.batch_size, num_workers=args.workers)
+    if split == "test":
+        return loaders.get_test_loader(batch_size=args.batch_size, num_workers=args.workers)
+    return loaders.get_val_loader(batch_size=args.batch_size, num_workers=args.workers)
 
-buf = {}
-def hook(mod, inp):
-    buf['x'] = inp[0].detach().cpu()
-model.fc.register_forward_pre_hook(lambda m, inp: hook(m, inp))
-
-def collect(loader):
+def collect_features(model, loader, device, max_samples):
+    buf = {}
+    def hook(mod, inp):
+        buf['x'] = inp[0].detach().cpu()
+    handle = model.fc.register_forward_pre_hook(lambda m, inp: hook(m, inp))
     feats = []
     labels = []
+    total = 0
     for x, y in loader:
         x = x.to(device)
         with torch.no_grad():
@@ -58,48 +34,75 @@ def collect(loader):
         f = buf['x']
         feats.append(f)
         labels.append(y)
+        total += f.size(0)
+        if max_samples and total >= max_samples:
+            break
+    handle.remove()
     return torch.cat(feats, 0).numpy(), torch.cat(labels, 0).numpy()
 
-loader_orig = get_loader('NTU')
-loader_rtg = get_loader('NTU_ID')
+def subsample_per_id(x, y, samples_per_id, seed):
+    if not samples_per_id:
+        return x, y
+    rng = np.random.RandomState(seed)
+    xs = []
+    ys = []
+    for pid in np.unique(y):
+        idx = np.where(y == pid)[0]
+        if len(idx) > samples_per_id:
+            idx = rng.choice(idx, samples_per_id, replace=False)
+        xs.append(x[idx])
+        ys.append(y[idx])
+    return np.concatenate(xs, 0), np.concatenate(ys, 0)
 
-X_orig, Y_orig = collect(loader_orig)
-X_rtg, Y_rtg = collect(loader_rtg)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default='NTU_ID')
+    parser.add_argument('--case', type=int, default=0)
+    parser.add_argument('--seg', type=int, default=20)
+    parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'])
+    parser.add_argument('--ckpt', type=str, default='results/NTU_ID/SGN/0_best.pth')
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--perplexity', type=float, default=30.0)
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--max-samples', type=int, default=2000)
+    parser.add_argument('--samples-per-id', type=int, default=100)
+    parser.add_argument('--out', type=str, default='tsne_person.png')
+    parser.add_argument('--motion-only', action='store_true')
+    args = parser.parse_args()
 
-X = np.concatenate([X_orig, X_rtg], 0)
-D = np.concatenate([np.zeros(len(X_orig)), np.ones(len(X_rtg))], 0)
+    num_classes = get_num_classes(args.dataset)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-tsne = TSNE(n_components=2, perplexity=30, random_state=0)
-Z = tsne.fit_transform(X)
+    model = SGN(num_classes, args.dataset, args.seg, args).to(device).eval()
+    try:
+        sd = torch.load(args.ckpt, weights_only=True)
+    except TypeError:
+        sd = torch.load(args.ckpt)
+    state = sd['state_dict'] if 'state_dict' in sd else sd
+    try:
+        model.load_state_dict(state)
+    except RuntimeError:
+        model.load_state_dict(state, strict=False)
 
-plt.figure(figsize=(8, 6))
-u = np.unique(Y_orig)
-cmap = plt.cm.get_cmap('tab20', len(u))
-for i, a in enumerate(u):
-    idx = (np.arange(len(X_orig)))[Y_orig == a]
-    plt.scatter(Z[idx, 0], Z[idx, 1], s=6, alpha=0.7, color=cmap(i))
-plt.scatter(Z[len(X_orig):, 0], Z[len(X_orig):, 1], s=6, alpha=0.7, marker='x', color='k')
-plt.tight_layout()
-plt.savefig('tsne_action.png', dpi=200)
+    loader = get_loader(args, args.split)
+    X, Y = collect_features(model, loader, device, args.max_samples)
+    X, Y = subsample_per_id(X, Y, args.samples_per_id, args.seed)
 
-plt.figure(figsize=(8, 6))
-idx0 = D == 0
-idx1 = D == 1
-plt.scatter(Z[idx0, 0], Z[idx0, 1], s=6, alpha=0.7, label='orig', color='#1f77b4')
-plt.scatter(Z[idx1, 0], Z[idx1, 1], s=6, alpha=0.7, label='retarget', color='#ff7f0e', marker='x')
-plt.legend()
-plt.tight_layout()
-plt.savefig('tsne_domain.png', dpi=200)
+    n = X.shape[0]
+    max_p = max(5, (n - 1) // 3) if n > 3 else 5
+    perplexity = min(args.perplexity, max_p)
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=args.seed, init='random')
+    Z = tsne.fit_transform(X)
 
-if len(np.unique(Y_orig)) > 1:
-    sil = silhouette_score(X_orig, Y_orig, metric='euclidean')
-    print('Silhouette by action (orig):', round(float(sil), 4))
+    plt.figure(figsize=(8, 6))
+    ids = np.unique(Y)
+    cmap = plt.cm.get_cmap('tab20', len(ids))
+    for i, pid in enumerate(ids):
+        idx = np.where(Y == pid)[0]
+        plt.scatter(Z[idx, 0], Z[idx, 1], s=6, alpha=0.7, color=cmap(i))
+    plt.tight_layout()
+    plt.savefig(args.out, dpi=200)
 
-knn = KNeighborsClassifier(n_neighbors=5)
-knn.fit(X_orig, Y_orig)
-Y_rtg_pred = knn.predict(X_rtg)
-match_rate = (Y_rtg_pred == Y_rtg).mean() if Y_rtg_pred.shape == Y_rtg.shape else np.nan
-print('kNN transfer action match rate (if Y_rtg==action):', match_rate)
-
-np.savez('domain_offset_features.npz',
-         Z=Z, X=X, D=D, Y_orig=Y_orig, Y_rtg=Y_rtg, Y_rtg_pred=Y_rtg_pred)
+if __name__ == '__main__':
+    main()
