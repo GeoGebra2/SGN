@@ -109,8 +109,8 @@ def main():
                          val_loss, float(val_acc1), float(val_acc2), float(val_acc3)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
-                  'Train: loss {:.4f}\taccu@1 {:.4f}\taccu@2 {:.4f}\taccu@3 {:.4f}\t'
-                  'Valid: loss {:.4f}\taccu@1 {:.4f}\taccu@2 {:.4f}\taccu@3 {:.4f}'
+                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\t'
+                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}'
                   .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3,
                           val_loss, val_acc1, val_acc2, val_acc3))
 
@@ -186,9 +186,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
         if (i + 1) % args.print_freq == 0:
             print('Epoch-{:<3d} {:3d} batches\t'
                   'loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'accu@1 {acc1.val:.3f} ({acc1.avg:.3f})\t'
-                  'accu@2 {acc2.val:.3f} ({acc2.avg:.3f})\t'
-                  'accu@3 {acc3.val:.3f} ({acc3.avg:.3f})'.format(
+                  'Top-1 accu {acc1.val:.3f} ({acc1.avg:.3f})\t'
+                  'Top-2 accu {acc2.val:.3f} ({acc2.avg:.3f})\t'
+                  'Top-3 accu {acc3.val:.3f} ({acc3.avg:.3f})'.format(
                    epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3))
 
     return losses.avg, acc1.avg, acc2.avg, acc3.avg
@@ -250,7 +250,7 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     pred_output = np.concatenate(pred_output, axis=0)
     np.savetxt(pred_path, pred_output, fmt='%f')
 
-    print('Test: accuracy@1 {:.3f}, accuracy@2 {:.3f}, accuracy@3 {:.3f}, time: {:.2f}s'
+    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, time: {:.2f}s'
           .format(acc1.avg, acc2.avg, acc3.avg, time.time() - t_start))
 
 
