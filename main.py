@@ -103,16 +103,18 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc = validate(val_loader, model, criterion)
-            log_res += [[train_loss, float(train_acc),\
-                         val_loss, float(val_acc)]]
+            train_loss, train_acc1, train_acc2, train_acc3 = train(train_loader, model, criterion, optimizer, epoch)
+            val_loss, val_acc1, val_acc2, val_acc3 = validate(val_loader, model, criterion)
+            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3),\
+                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
-                  'Train: loss {:.4f}\taccu {:.4f}\tValid: loss {:.4f}\taccu {:.4f}'
-                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc, val_loss, val_acc))
+                  'Train: loss {:.4f}\taccu@1 {:.4f}\taccu@2 {:.4f}\taccu@3 {:.4f}\t'
+                  'Valid: loss {:.4f}\taccu@1 {:.4f}\taccu@2 {:.4f}\taccu@3 {:.4f}'
+                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3,
+                          val_loss, val_acc1, val_acc2, val_acc3))
 
-            current = val_loss if mode == 'min' else val_acc
+            current = val_loss if mode == 'min' else val_acc1
 
             ####### store tensor in cpu
             current = float(current)
@@ -140,7 +142,7 @@ def main():
         print('Best %s: %.4f from epoch-%d' % (args.monitor, best, best_epoch))
         with open(csv_file, 'w') as fw:
             cw = csv.writer(fw)
-            cw.writerow(['loss', 'acc', 'val_loss', 'val_acc'])
+            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3'])
             cw.writerows(log_res)
         print('Save train and validation log into into %s' % csv_file)
 
@@ -153,7 +155,9 @@ def main():
 
 def train(train_loader, model, criterion, optimizer, epoch):
     losses = AverageMeter()
-    acces = AverageMeter()
+    acc1 = AverageMeter()
+    acc2 = AverageMeter()
+    acc3 = AverageMeter()
     model.train()
 
     for i, (inputs, target) in enumerate(train_loader):
@@ -168,9 +172,11 @@ def train(train_loader, model, criterion, optimizer, epoch):
             loss = loss + args.metric_weight * metric
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target)
+        acc = accuracy(output.data, target, topk=(1, 2, 3))
         losses.update(loss.item(), inputs.size(0))
-        acces.update(acc[0], inputs.size(0))
+        acc1.update(acc[0], inputs.size(0))
+        acc2.update(acc[1], inputs.size(0))
+        acc3.update(acc[2], inputs.size(0))
 
         # backward
         optimizer.zero_grad()
@@ -180,15 +186,19 @@ def train(train_loader, model, criterion, optimizer, epoch):
         if (i + 1) % args.print_freq == 0:
             print('Epoch-{:<3d} {:3d} batches\t'
                   'loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'accu {acc.val:.3f} ({acc.avg:.3f})'.format(
-                   epoch + 1, i + 1, loss=losses, acc=acces))
+                  'accu@1 {acc1.val:.3f} ({acc1.avg:.3f})\t'
+                  'accu@2 {acc2.val:.3f} ({acc2.avg:.3f})\t'
+                  'accu@3 {acc3.val:.3f} ({acc3.avg:.3f})'.format(
+                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3))
 
-    return losses.avg, acces.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg
 
 
 def validate(val_loader, model, criterion):
     losses = AverageMeter()
-    acces = AverageMeter()
+    acc1 = AverageMeter()
+    acc2 = AverageMeter()
+    acc3 = AverageMeter()
     model.eval()
 
     for i, (inputs, target) in enumerate(val_loader):
@@ -199,15 +209,19 @@ def validate(val_loader, model, criterion):
             loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target)
+        acc = accuracy(output.data, target, topk=(1, 2, 3))
         losses.update(loss.item(), inputs.size(0))
-        acces.update(acc[0], inputs.size(0))
+        acc1.update(acc[0], inputs.size(0))
+        acc2.update(acc[1], inputs.size(0))
+        acc3.update(acc[2], inputs.size(0))
 
-    return losses.avg, acces.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg
 
 
 def test(test_loader, model, checkpoint, lable_path, pred_path):
-    acces = AverageMeter()
+    acc1 = AverageMeter()
+    acc2 = AverageMeter()
+    acc3 = AverageMeter()
     # load learnt model that obtained best performance on validation set
     model.load_state_dict(torch.load(checkpoint)['state_dict'])
     model.eval()
@@ -225,8 +239,10 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
         label_output.append(target.cpu().numpy())
         pred_output.append(output.cpu().numpy())
 
-        acc = accuracy(output.data, target.cuda(non_blocking=True))
-        acces.update(acc[0], inputs.size(0))
+        acc = accuracy(output.data, target.cuda(non_blocking=True), topk=(1, 2, 3))
+        acc1.update(acc[0], inputs.size(0))
+        acc2.update(acc[1], inputs.size(0))
+        acc3.update(acc[2], inputs.size(0))
 
 
     label_output = np.concatenate(label_output, axis=0)
@@ -234,18 +250,21 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     pred_output = np.concatenate(pred_output, axis=0)
     np.savetxt(pred_path, pred_output, fmt='%f')
 
-    print('Test: accuracy {:.3f}, time: {:.2f}s'
-          .format(acces.avg, time.time() - t_start))
+    print('Test: accuracy@1 {:.3f}, accuracy@2 {:.3f}, accuracy@3 {:.3f}, time: {:.2f}s'
+          .format(acc1.avg, acc2.avg, acc3.avg, time.time() - t_start))
 
 
-def accuracy(output, target):
+def accuracy(output, target, topk=(1,)):
+    maxk = max(topk)
     batch_size = target.size(0)
-    _, pred = output.topk(1, 1, True, True)
+    _, pred = output.topk(maxk, 1, True, True)
     pred = pred.t()
     correct = pred.eq(target.view(1, -1).expand_as(pred))
-    correct = correct.view(-1).float().sum(0, keepdim=True)
-
-    return correct.mul_(100.0 / batch_size)
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
 
 def save_checkpoint(state, filename='checkpoint.pth.tar', is_best=False):
     torch.save(state, filename)
