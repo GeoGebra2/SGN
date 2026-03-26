@@ -103,16 +103,16 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3 = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc1, val_acc2, val_acc3 = validate(val_loader, model, criterion)
-            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3),\
-                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3)]]
+            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch)
+            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, model, criterion)
+            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
+                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
-                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\t'
-                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}'
-                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3,
-                          val_loss, val_acc1, val_acc2, val_acc3))
+                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\t'
+                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}'
+                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5,
+                          val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5))
 
             current = val_loss if mode == 'min' else val_acc1
 
@@ -142,7 +142,7 @@ def main():
         print('Best %s: %.4f from epoch-%d' % (args.monitor, best, best_epoch))
         with open(csv_file, 'w') as fw:
             cw = csv.writer(fw)
-            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3'])
+            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'acc@4', 'acc@5', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3', 'val_acc@4', 'val_acc@5'])
             cw.writerows(log_res)
         print('Save train and validation log into into %s' % csv_file)
 
@@ -158,6 +158,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
+    acc4 = AverageMeter()
+    acc5 = AverageMeter()
     model.train()
 
     for i, (inputs, target) in enumerate(train_loader):
@@ -172,11 +174,13 @@ def train(train_loader, model, criterion, optimizer, epoch):
             loss = loss + args.metric_weight * metric
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3))
+        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
         losses.update(loss.item(), inputs.size(0))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
         acc3.update(acc[2], inputs.size(0))
+        acc4.update(acc[3], inputs.size(0))
+        acc5.update(acc[4], inputs.size(0))
 
         # backward
         optimizer.zero_grad()
@@ -188,10 +192,12 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Top-1 accu {acc1.val:.3f} ({acc1.avg:.3f})\t'
                   'Top-2 accu {acc2.val:.3f} ({acc2.avg:.3f})\t'
-                  'Top-3 accu {acc3.val:.3f} ({acc3.avg:.3f})'.format(
-                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3))
+                  'Top-3 accu {acc3.val:.3f} ({acc3.avg:.3f})\t'
+                  'Top-4 accu {acc4.val:.3f} ({acc4.avg:.3f})\t'
+                  'Top-5 accu {acc5.val:.3f} ({acc5.avg:.3f})'.format(
+                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3, acc4=acc4, acc5=acc5))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
 
 
 def validate(val_loader, model, criterion):
@@ -199,6 +205,8 @@ def validate(val_loader, model, criterion):
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
+    acc4 = AverageMeter()
+    acc5 = AverageMeter()
     model.eval()
 
     for i, (inputs, target) in enumerate(val_loader):
@@ -209,19 +217,23 @@ def validate(val_loader, model, criterion):
             loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3))
+        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
         losses.update(loss.item(), inputs.size(0))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
         acc3.update(acc[2], inputs.size(0))
+        acc4.update(acc[3], inputs.size(0))
+        acc5.update(acc[4], inputs.size(0))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
 
 
 def test(test_loader, model, checkpoint, lable_path, pred_path):
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
+    acc4 = AverageMeter()
+    acc5 = AverageMeter()
     # load learnt model that obtained best performance on validation set
     model.load_state_dict(torch.load(checkpoint)['state_dict'])
     model.eval()
@@ -239,10 +251,12 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
         label_output.append(target.cpu().numpy())
         pred_output.append(output.cpu().numpy())
 
-        acc = accuracy(output.data, target.cuda(non_blocking=True), topk=(1, 2, 3))
+        acc = accuracy(output.data, target.cuda(non_blocking=True), topk=(1, 2, 3, 4, 5))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
         acc3.update(acc[2], inputs.size(0))
+        acc4.update(acc[3], inputs.size(0))
+        acc5.update(acc[4], inputs.size(0))
 
 
     label_output = np.concatenate(label_output, axis=0)
@@ -250,8 +264,8 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     pred_output = np.concatenate(pred_output, axis=0)
     np.savetxt(pred_path, pred_output, fmt='%f')
 
-    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, time: {:.2f}s'
-          .format(acc1.avg, acc2.avg, acc3.avg, time.time() - t_start))
+    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, Top-4 accu {:.3f}, Top-5 accu {:.3f}, time: {:.2f}s'
+          .format(acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, time.time() - t_start))
 
 
 def accuracy(output, target, topk=(1,)):
