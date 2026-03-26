@@ -88,6 +88,9 @@ def main():
     loader = get_loader(args, args.split)
     X, Y = collect_features(model, loader, device, args.max_samples)
     X, Y = subsample_per_id(X, Y, args.samples_per_id, args.seed)
+    ids, counts = np.unique(Y, return_counts=True)
+    for pid, cnt in zip(ids, counts):
+        print(f'person {int(pid)}: {int(cnt)} samples')
 
     n = X.shape[0]
     max_p = max(5, (n - 1) // 3) if n > 3 else 5
