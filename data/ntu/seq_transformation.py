@@ -227,7 +227,7 @@ def get_indices(performer, camera, evaluation='CS'):
         for train_id in train_ids:
             temp = np.where(performer == train_id)[0]  # 0-based index
             train_indices = np.hstack((train_indices, temp)).astype(int)
-    else:  # Cross View (Camera IDs)
+    elif evaluation == 'CV':  # Cross View (Camera IDs)
         train_ids = [2, 3]
         test_ids = 1
         # Get indices of test data
@@ -238,6 +238,22 @@ def get_indices(performer, camera, evaluation='CS'):
         for train_id in train_ids:
             temp = np.where(camera == train_id)[0]  # 0-based index
             train_indices = np.hstack((train_indices, temp)).astype(int)
+    else:  # Cross Random within each Camera
+        rng = np.random.RandomState(10000)
+        train_parts = []
+        test_parts = []
+        for cam_id in [1, 2, 3]:
+            cam_idx = np.where(camera == cam_id)[0]
+            if cam_idx.size == 0:
+                continue
+            rng.shuffle(cam_idx)
+            split = int(np.ceil(len(cam_idx) * 2 / 3))
+            train_parts.append(cam_idx[:split])
+            test_parts.append(cam_idx[split:])
+        if train_parts:
+            train_indices = np.concatenate(train_parts, axis=0).astype(int)
+        if test_parts:
+            test_indices = np.concatenate(test_parts, axis=0).astype(int)
 
     return train_indices, test_indices
 
@@ -263,7 +279,7 @@ if __name__ == '__main__':
 
     skes_joints = align_frames(skes_joints, frames_cnt)  # aligned to the same frame length
 
-    evaluations = ['CS', 'CV']
+    evaluations = ['CS', 'CV', 'CR']
     for evaluation in evaluations:
         split_dataset(skes_joints, label, performer, camera, evaluation, save_path)
         split_dataset_id(skes_joints, performer, camera, evaluation, save_path)

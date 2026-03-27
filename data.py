@@ -81,12 +81,16 @@ class NTUDataLoaders(object):
                 self.metric = 'CS'
             elif self.case == 1:
                 self.metric = 'CV'
+            elif self.case == 2:
+                self.metric = 'CR'
             path = osp.join('./data/ntu', 'NTU_' + self.metric + '.h5')
         elif self.dataset == 'NTU_ID':
             if self.case == 0:
                 self.metric = 'CS'
             elif self.case == 1:
                 self.metric = 'CV'
+            elif self.case == 2:
+                self.metric = 'CR'
             path = osp.join('./data/ntu', 'NTU_ID_' + self.metric + '.h5')
 
         f = h5py.File(path , 'r')
@@ -128,10 +132,14 @@ class NTUDataLoaders(object):
                 theta = 0.3
             elif self.case == 1:
                 theta = 0.5
+            elif self.case == 2:
+                theta = 0.5
         elif self.dataset == 'NTU_ID':
             if self.case == 0:
                 theta = 0.3
             elif self.case == 1:
+                theta = 0.5
+            elif self.case == 2:
                 theta = 0.5
         elif self.dataset == 'NTU120':
             theta = 0.3
