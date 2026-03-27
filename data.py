@@ -121,6 +121,7 @@ class NTUDataLoaders(object):
         y = np.array(y)[idx]
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = _view_normalize(x)
 
         if self.dataset == 'NTU':
             if self.case == 0:
@@ -152,6 +153,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = _view_normalize(x)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -167,6 +169,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = _view_normalize(x)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -284,3 +287,27 @@ def _transform(x, theta):
 
     x = x.contiguous().view(x.size()[:2] + (-1,))
     return x
+
+def _view_normalize(x):
+    if x.size(-1) % 3 != 0:
+        return x
+    num_joints = x.size(-1) // 3
+    if num_joints <= 16:
+        return x
+    x_ = x.contiguous().view(x.size()[:2] + (num_joints, 3))
+    left = x_[:, :, 12, :]
+    right = x_[:, :, 16, :]
+    v = (left - right).mean(dim=1)
+    angle = torch.atan2(v[:, 2], v[:, 0])
+    cos = torch.cos(-angle)
+    sin = torch.sin(-angle)
+    rot = x_.new_zeros((x_.size(0), 3, 3))
+    rot[:, 0, 0] = cos
+    rot[:, 0, 2] = sin
+    rot[:, 1, 1] = 1
+    rot[:, 2, 0] = -sin
+    rot[:, 2, 2] = cos
+    x_flat = x_.reshape(x_.size(0), -1, 3)
+    x_rot = torch.bmm(x_flat, rot.transpose(1, 2))
+    x_rot = x_rot.reshape_as(x_)
+    return x_rot.view(x.size())
