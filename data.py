@@ -107,6 +107,8 @@ class NTUDataLoaders(object):
         self.train_Y = np.concatenate([self.train_Y, self.val_Y], axis=0)
         self.val_X = self.test_X
         self.val_Y = self.test_Y
+        print('Dataset split:', self.dataset, self.metric, 'train', len(self.train_Y), 'val', len(self.val_Y), 'test', len(self.test_Y))
+        print('Label coverage:', 'train', len(np.unique(self.train_Y)), 'val', len(np.unique(self.val_Y)), 'test', len(np.unique(self.test_Y)))
 
     def collate_fn_fix_train(self, batch):
         """Puts each data field into a tensor with outer dimension batch size
@@ -125,7 +127,7 @@ class NTUDataLoaders(object):
         y = np.array(y)[idx]
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        x = _view_normalize(x)
+        #x = _view_normalize(x)
 
         if self.dataset == 'NTU':
             if self.case == 0:
@@ -161,7 +163,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        x = _view_normalize(x)
+        #x = _view_normalize(x)
         y = torch.LongTensor(y)
 
         return [x, y]
@@ -177,7 +179,7 @@ class NTUDataLoaders(object):
 
         x = torch.stack([torch.from_numpy(x[i]) for i in idx], 0)
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        x = _view_normalize(x)
+        #x = _view_normalize(x)
         y = torch.LongTensor(y)
 
         return [x, y]
