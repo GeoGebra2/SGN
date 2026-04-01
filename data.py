@@ -83,6 +83,8 @@ class NTUDataLoaders(object):
                 self.metric = 'CV'
             elif self.case == 2:
                 self.metric = 'CR'
+            elif self.case == 3:
+                self.metric = 'CA'
             path = osp.join('./data/ntu', 'NTU_' + self.metric + '.h5')
         elif self.dataset == 'NTU_ID':
             if self.case == 0:
@@ -91,6 +93,8 @@ class NTUDataLoaders(object):
                 self.metric = 'CV'
             elif self.case == 2:
                 self.metric = 'CR'
+            elif self.case == 3:
+                self.metric = 'CA'
             path = osp.join('./data/ntu', 'NTU_ID_' + self.metric + '.h5')
 
         f = h5py.File(path , 'r')
@@ -102,11 +106,11 @@ class NTUDataLoaders(object):
         self.test_Y = np.argmax(f['test_y'][:], -1)
         f.close()
 
-        ## Combine the training data and validation data togehter as ST-GCN
-        self.train_X = np.concatenate([self.train_X, self.val_X], axis=0)
-        self.train_Y = np.concatenate([self.train_Y, self.val_Y], axis=0)
-        self.val_X = self.test_X
-        self.val_Y = self.test_Y
+        if self.metric == 'CS' or self.metric == 'CV' or self.metric == 'CR':
+            self.train_X = np.concatenate([self.train_X, self.val_X], axis=0)
+            self.train_Y = np.concatenate([self.train_Y, self.val_Y], axis=0)
+            self.val_X = self.test_X
+            self.val_Y = self.test_Y
         print('Dataset split:', self.dataset, self.metric, 'train', len(self.train_Y), 'val', len(self.val_Y), 'test', len(self.test_Y))
         print('Label coverage:', 'train', len(np.unique(self.train_Y)), 'val', len(np.unique(self.val_Y)), 'test', len(np.unique(self.test_Y)))
 
@@ -136,12 +140,16 @@ class NTUDataLoaders(object):
                 theta = 0.5
             elif self.case == 2:
                 theta = 0.5
+            elif self.case == 3:
+                theta = 0.5
         elif self.dataset == 'NTU_ID':
             if self.case == 0:
                 theta = 0.3
             elif self.case == 1:
                 theta = 0.5
             elif self.case == 2:
+                theta = 0.5
+            elif self.case == 3:
                 theta = 0.5
         elif self.dataset == 'NTU120':
             theta = 0.3
