@@ -29,7 +29,7 @@ parser.set_defaults(
     case = 0,
     batch_size=64,
     max_epochs=120,
-    monitor='val_acc',
+    monitor='val_auc',
     lr=0.001,
     weight_decay=0.0001,
     lr_factor=0.1,
@@ -54,10 +54,10 @@ def main():
         print('It is using GPU!')
         model = model.cuda()
 
-    criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
+    criterion = nn.BCEWithLogitsLoss().cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    if args.monitor == 'val_acc':
+    if args.monitor == 'val_auc':
         mode = 'max'
         monitor_op = np.greater
         best = -np.inf
@@ -103,18 +103,17 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, model, criterion)
-            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
-                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5)]]
+            train_loss, train_acc, train_auc = train(train_loader, model, criterion, optimizer, epoch)
+            val_loss, val_acc, val_auc = validate(val_loader, model, criterion)
+            log_res += [[train_loss, float(train_acc), float(train_auc), val_loss, float(val_acc), float(val_auc)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
-                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\t'
-                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}'
-                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5,
-                          val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5))
+                  'Train: loss {:.4f}\tPair-Acc {:.4f}\tPair-AUC {:.4f}\t'
+                  'Valid: loss {:.4f}\tPair-Acc {:.4f}\tPair-AUC {:.4f}'
+                  .format(epoch + 1, time.time() - t_start, train_loss, train_acc, train_auc,
+                          val_loss, val_acc, val_auc))
 
-            current = val_loss if mode == 'min' else val_acc1
+            current = val_loss if mode == 'min' else val_auc
 
             ####### store tensor in cpu
             current = float(current)
@@ -142,7 +141,7 @@ def main():
         print('Best %s: %.4f from epoch-%d' % (args.monitor, best, best_epoch))
         with open(csv_file, 'w') as fw:
             cw = csv.writer(fw)
-            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'acc@4', 'acc@5', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3', 'val_acc@4', 'val_acc@5'])
+            cw.writerow(['loss', 'pair_acc', 'pair_auc', 'val_loss', 'val_pair_acc', 'val_pair_auc'])
             cw.writerows(log_res)
         print('Save train and validation log into into %s' % csv_file)
 
@@ -155,34 +154,29 @@ def main():
 
 def train(train_loader, model, criterion, optimizer, epoch):
     losses = AverageMeter()
-    acc1 = AverageMeter()
-    acc2 = AverageMeter()
-    acc3 = AverageMeter()
-    acc4 = AverageMeter()
-    acc5 = AverageMeter()
+    acc = AverageMeter()
+    auc = AverageMeter()
     model.train()
 
     for i, (inputs, target) in enumerate(train_loader):
 
         inputs = inputs.cuda()
-        feats = model.forward_features(inputs)
-        output = model.fc(feats)
+        feats = model(inputs)
         target = target.cuda(non_blocking=True)
-        loss = criterion(output, target)
+        pair_logits, pair_target = build_pair_logits(feats, target, model.logit_scale, max_pairs=4096)
+        if pair_logits is None:
+            continue
+        loss = criterion(pair_logits, pair_target)
         if args.metric_loss != 'none':
             metric = metric_loss(feats, target, args)
             loss = loss + args.metric_weight * metric
 
-        # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
+        batch_acc, batch_auc = binary_scores(pair_logits.detach(), pair_target.detach())
         losses.update(loss.item(), inputs.size(0))
-        acc1.update(acc[0], inputs.size(0))
-        acc2.update(acc[1], inputs.size(0))
-        acc3.update(acc[2], inputs.size(0))
-        acc4.update(acc[3], inputs.size(0))
-        acc5.update(acc[4], inputs.size(0))
+        acc.update(batch_acc, pair_target.size(0))
+        if np.isfinite(batch_auc):
+            auc.update(batch_auc, pair_target.size(0))
 
-        # backward
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -190,82 +184,77 @@ def train(train_loader, model, criterion, optimizer, epoch):
         if (i + 1) % args.print_freq == 0:
             print('Epoch-{:<3d} {:3d} batches\t'
                   'loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Top-1 accu {acc1.val:.3f} ({acc1.avg:.3f})\t'
-                  'Top-2 accu {acc2.val:.3f} ({acc2.avg:.3f})\t'
-                  'Top-3 accu {acc3.val:.3f} ({acc3.avg:.3f})\t'
-                  'Top-4 accu {acc4.val:.3f} ({acc4.avg:.3f})\t'
-                  'Top-5 accu {acc5.val:.3f} ({acc5.avg:.3f})'.format(
-                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3, acc4=acc4, acc5=acc5))
+                  'Pair-Acc {acc.val:.3f} ({acc.avg:.3f})\t'
+                  'Pair-AUC {auc.val:.3f} ({auc.avg:.3f})'.format(
+                   epoch + 1, i + 1, loss=losses, acc=acc, auc=auc))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
+    return losses.avg, acc.avg, auc.avg
 
 
 def validate(val_loader, model, criterion):
     losses = AverageMeter()
-    acc1 = AverageMeter()
-    acc2 = AverageMeter()
-    acc3 = AverageMeter()
-    acc4 = AverageMeter()
-    acc5 = AverageMeter()
+    acc = AverageMeter()
+    auc = AverageMeter()
     model.eval()
 
     for i, (inputs, target) in enumerate(val_loader):
         with torch.no_grad():
-            output = model(inputs.cuda())
+            feats = model(inputs.cuda())
         target = target.cuda(non_blocking=True)
         with torch.no_grad():
-            loss = criterion(output, target)
+            pair_logits, pair_target = build_pair_logits(feats, target, model.logit_scale, max_pairs=4096)
+            if pair_logits is None:
+                continue
+            loss = criterion(pair_logits, pair_target)
 
-        # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
+        batch_acc, batch_auc = binary_scores(pair_logits.detach(), pair_target.detach())
         losses.update(loss.item(), inputs.size(0))
-        acc1.update(acc[0], inputs.size(0))
-        acc2.update(acc[1], inputs.size(0))
-        acc3.update(acc[2], inputs.size(0))
-        acc4.update(acc[3], inputs.size(0))
-        acc5.update(acc[4], inputs.size(0))
+        acc.update(batch_acc, pair_target.size(0))
+        if np.isfinite(batch_auc):
+            auc.update(batch_auc, pair_target.size(0))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
+    return losses.avg, acc.avg, auc.avg
 
 
 def test(test_loader, model, checkpoint, lable_path, pred_path):
-    acc1 = AverageMeter()
-    acc2 = AverageMeter()
-    acc3 = AverageMeter()
-    acc4 = AverageMeter()
-    acc5 = AverageMeter()
-    # load learnt model that obtained best performance on validation set
+    acc = AverageMeter()
+    auc = AverageMeter()
     model.load_state_dict(torch.load(checkpoint)['state_dict'])
     model.eval()
 
-    label_output = list()
-    pred_output = list()
+    label_output = []
+    pred_output = []
+    emb_output = []
 
     t_start = time.time()
     for i, (inputs, target) in enumerate(test_loader):
         with torch.no_grad():
-            output = model(inputs.cuda())
-            output = output.view((-1, inputs.size(0)//target.size(0), output.size(1)))
-            output = output.mean(1)
+            feats = model(inputs.cuda())
+            feats = feats.view((-1, inputs.size(0)//target.size(0), feats.size(1)))
+            feats = feats.mean(1)
 
-        label_output.append(target.cpu().numpy())
-        pred_output.append(output.cpu().numpy())
+        emb_output.append(feats.cpu())
+        label_output.append(target.cpu())
 
-        acc = accuracy(output.data, target.cuda(non_blocking=True), topk=(1, 2, 3, 4, 5))
-        acc1.update(acc[0], inputs.size(0))
-        acc2.update(acc[1], inputs.size(0))
-        acc3.update(acc[2], inputs.size(0))
-        acc4.update(acc[3], inputs.size(0))
-        acc5.update(acc[4], inputs.size(0))
+    embeddings = torch.cat(emb_output, dim=0).cuda()
+    labels = torch.cat(label_output, dim=0).cuda()
+    pair_logits, pair_target = build_pair_logits(embeddings, labels, model.logit_scale, max_pairs=200000)
+    if pair_logits is not None:
+        batch_acc, batch_auc = binary_scores(pair_logits.detach(), pair_target.detach())
+        acc.update(batch_acc, pair_target.size(0))
+        if np.isfinite(batch_auc):
+            auc.update(batch_auc, pair_target.size(0))
+        pred_output = torch.sigmoid(pair_logits).detach().cpu().numpy()
+        label_output = pair_target.detach().cpu().numpy()
+    else:
+        pred_output = np.array([])
+        label_output = np.array([])
 
-
-    label_output = np.concatenate(label_output, axis=0)
     np.savetxt(lable_path, label_output, fmt='%d')
-    pred_output = np.concatenate(pred_output, axis=0)
     np.savetxt(pred_path, pred_output, fmt='%f')
 
-    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, Top-4 accu {:.3f}, Top-5 accu {:.3f}, time: {:.2f}s'
-          .format(acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, time.time() - t_start))
+    print('Test: Pair-Acc {:.3f}, Pair-AUC {:.3f}, time: {:.2f}s'
+          .format(acc.avg, auc.avg, time.time() - t_start))
 
 
 def accuracy(output, target, topk=(1,)):
@@ -279,6 +268,59 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size).item())
     return res
+
+
+def build_pair_logits(feats, labels, logit_scale, max_pairs=4096):
+    n = labels.size(0)
+    if n < 2:
+        return None, None
+    idx = torch.triu_indices(n, n, offset=1, device=labels.device)
+    if idx.size(1) == 0:
+        return None, None
+    pair_targets_all = (labels[idx[0]] == labels[idx[1]]).float()
+    pos_idx = torch.where(pair_targets_all > 0.5)[0]
+    neg_idx = torch.where(pair_targets_all < 0.5)[0]
+    if pos_idx.numel() == 0 and neg_idx.numel() == 0:
+        return None, None
+    if pos_idx.numel() > 0 and neg_idx.numel() > 0:
+        n_each = min(pos_idx.numel(), neg_idx.numel(), max_pairs // 2)
+        pos_idx = pos_idx[torch.randperm(pos_idx.numel(), device=labels.device)[:n_each]]
+        neg_idx = neg_idx[torch.randperm(neg_idx.numel(), device=labels.device)[:n_each]]
+        select_idx = torch.cat([pos_idx, neg_idx], dim=0)
+    else:
+        select_pool = pos_idx if pos_idx.numel() > 0 else neg_idx
+        keep = min(select_pool.numel(), max_pairs)
+        select_idx = select_pool[torch.randperm(select_pool.numel(), device=labels.device)[:keep]]
+    i = idx[0][select_idx]
+    j = idx[1][select_idx]
+    pair_targets = pair_targets_all[select_idx]
+    sim = (feats[i] * feats[j]).sum(dim=1)
+    scale = torch.clamp(logit_scale, min=1.0, max=50.0)
+    pair_logits = sim * scale
+    return pair_logits, pair_targets
+
+
+def binary_scores(pair_logits, pair_targets):
+    prob = torch.sigmoid(pair_logits)
+    pred = (prob >= 0.5).float()
+    acc = (pred == pair_targets).float().mean().item() * 100.0
+    auc = compute_auc(pair_targets.detach().cpu().numpy(), prob.detach().cpu().numpy()) * 100.0
+    return acc, auc
+
+
+def compute_auc(labels, scores):
+    labels = labels.astype(np.int32)
+    pos = labels.sum()
+    neg = labels.shape[0] - pos
+    if pos == 0 or neg == 0:
+        return float('nan')
+    order = np.argsort(-scores, kind='mergesort')
+    labels_sorted = labels[order]
+    tps = np.cumsum(labels_sorted == 1)
+    fps = np.cumsum(labels_sorted == 0)
+    tpr = np.concatenate([[0.0], tps / float(pos)])
+    fpr = np.concatenate([[0.0], fps / float(neg)])
+    return np.trapz(tpr, fpr)
 
 def save_checkpoint(state, filename='checkpoint.pth.tar', is_best=False):
     torch.save(state, filename)

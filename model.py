@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 from torch import nn
 import torch
+import torch.nn.functional as F
 import math
 
 class SGN(nn.Module):
@@ -27,7 +28,13 @@ class SGN(nn.Module):
         self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
-        self.fc = nn.Linear(self.dim1 * 2, num_classes)
+        self.embedding = nn.Sequential(
+            nn.Linear(self.dim1 * 2, self.dim1, bias=bias),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(self.dim1, self.dim1 // 2, bias=bias),
+        )
+        self.logit_scale = nn.Parameter(torch.tensor(10.0))
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -80,7 +87,8 @@ class SGN(nn.Module):
 
     def forward(self, input):
         output = self.forward_features(input)
-        output = self.fc(output)
+        output = self.embedding(output)
+        output = F.normalize(output, dim=1)
         return output
 
     def one_hot(self, bs, spa, tem):
