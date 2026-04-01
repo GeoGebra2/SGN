@@ -42,6 +42,10 @@ args = parser.parse_args()
 
 def main():
 
+    if args.dataset == 'NTU_ID' and args.metric_loss == 'none':
+        args.metric_loss = 'supcon'
+        args.metric_weight = 1.0
+
     args.num_classes = get_num_classes(args.dataset)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
 

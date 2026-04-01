@@ -4,7 +4,6 @@ from torch.utils.data import Dataset, DataLoader
 import os
 import torch
 import numpy as np
-import h5py
 import random
 import os.path as osp
 import sys
@@ -16,6 +15,39 @@ else:
     import pickle
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
+
+
+class BalancedIdentityBatchSampler(torch.utils.data.Sampler):
+    def __init__(self, labels, batch_size, identities_per_batch=8, drop_last=True):
+        self.labels = np.asarray(labels, dtype=np.int64)
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+
+        label_set = np.unique(self.labels)
+        self.indices_by_label = {int(lab): np.where(self.labels == lab)[0] for lab in label_set}
+        self.label_set = np.array(sorted(self.indices_by_label.keys()), dtype=np.int64)
+
+        self.identities_per_batch = int(min(max(2, identities_per_batch), len(self.label_set)))
+        while self.identities_per_batch > 1 and (self.batch_size % self.identities_per_batch != 0):
+            self.identities_per_batch -= 1
+        self.samples_per_identity = max(1, self.batch_size // self.identities_per_batch)
+
+        self.num_batches = len(self.labels) // self.batch_size if self.drop_last else int(math.ceil(len(self.labels) / float(self.batch_size)))
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            chosen_labels = np.random.choice(self.label_set, size=self.identities_per_batch, replace=False)
+            batch_indices = []
+            for lab in chosen_labels:
+                pool = self.indices_by_label[int(lab)]
+                replace = pool.shape[0] < self.samples_per_identity
+                picked = np.random.choice(pool, size=self.samples_per_identity, replace=replace)
+                batch_indices.extend(picked.tolist())
+            random.shuffle(batch_indices)
+            yield batch_indices
 
 
 class NTUDataset(Dataset):
@@ -46,6 +78,10 @@ class NTUDataLoaders(object):
                               shuffle=True, num_workers=num_workers,
                               collate_fn=self.collate_fn_fix_val, pin_memory=False, drop_last=True)
         elif self.aug ==1:
+            if self.dataset == 'NTU_ID':
+                batch_sampler = BalancedIdentityBatchSampler(self.train_Y, batch_size=batch_size, identities_per_batch=8, drop_last=True)
+                return DataLoader(self.train_set, batch_sampler=batch_sampler,
+                                  num_workers=num_workers, collate_fn=self.collate_fn_fix_train, pin_memory=True)
             return DataLoader(self.train_set, batch_size=batch_size,
                               shuffle=True, num_workers=num_workers,
                               collate_fn=self.collate_fn_fix_train, pin_memory=True, drop_last=True)
@@ -76,6 +112,7 @@ class NTUDataLoaders(object):
         return len(self.test_Y)
 
     def create_datasets(self):
+        import h5py
         if self.dataset == 'NTU':
             if self.case ==0:
                 self.metric = 'CS'
