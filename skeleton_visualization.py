@@ -79,7 +79,7 @@ def _rgba_to_hex(rgba):
 
 def save_tsne_html(Z, pid, aid, out_html):
     pid_unique = np.unique(pid)
-    cmap = plt.cm.get_cmap('tab20', len(pid_unique))
+    cmap = plt.get_cmap('tab20', len(pid_unique))
     pid_to_color = {int(p): _rgba_to_hex(cmap(i)) for i, p in enumerate(pid_unique)}
 
     points = []
@@ -142,10 +142,10 @@ def save_tsne_html(Z, pid, aid, out_html):
     const x = d3.scaleLinear().domain([{x_min - pad_x}, {x_max + pad_x}]).range([0, innerW]);
     const y = d3.scaleLinear().domain([{y_min - pad_y}, {y_max + pad_y}]).range([innerH, 0]);
 
-    const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+    const g = svg.append("g").attr("transform", "translate(" + margin.left + "," + margin.top + ")");
 
     g.append("g")
-      .attr("transform", `translate(0,${innerH})`)
+      .attr("transform", "translate(0," + innerH + ")")
       .call(d3.axisBottom(x).ticks(6))
       .call(g => g.selectAll("text").attr("font-size", 11));
 
@@ -241,7 +241,7 @@ def main():
     else:
         plt.figure(figsize=(8, 6))
         ids = np.unique(PID)
-        cmap = plt.cm.get_cmap('tab20', len(ids))
+        cmap = plt.get_cmap('tab20', len(ids))
         for i, pid in enumerate(ids):
             idx = np.where(PID == pid)[0]
             plt.scatter(Z[idx, 0], Z[idx, 1], s=6, alpha=0.7, color=cmap(i))
