@@ -19,26 +19,38 @@ import matplotlib.pyplot as plt
 
 
 class NTUDataset(Dataset):
-    def __init__(self, x, y):
+    def __init__(self, x, y, pid=None, aid=None, return_meta=False):
         self.x = x
         self.y = np.array(y, dtype='int')
+        self.pid = None if pid is None else np.array(pid, dtype='int')
+        self.aid = None if aid is None else np.array(aid, dtype='int')
+        self.return_meta = return_meta
 
     def __len__(self):
         return len(self.y)
 
     def __getitem__(self, index):
+        if self.return_meta and (self.pid is not None) and (self.aid is not None):
+            return [self.x[index], int(self.y[index]), int(self.pid[index]), int(self.aid[index])]
         return [self.x[index], int(self.y[index])]
 
 class NTUDataLoaders(object):
-    def __init__(self, dataset ='NTU', case = 0, aug = 1, seg = 30):
+    def __init__(self, dataset='NTU', case=0, aug=1, seg=30, args=None, return_meta=False):
         self.dataset = dataset
         self.case = case
         self.aug = aug
         self.seg = seg
+        self.args = args
+        self.return_meta = return_meta
         self.create_datasets()
-        self.train_set = NTUDataset(self.train_X, self.train_Y)
-        self.val_set = NTUDataset(self.val_X, self.val_Y)
-        self.test_set = NTUDataset(self.test_X, self.test_Y)
+        if self.return_meta:
+            self.train_set = NTUDataset(self.train_X, self.train_Y, pid=self.train_pid, aid=self.train_aid, return_meta=True)
+            self.val_set = NTUDataset(self.val_X, self.val_Y, pid=self.val_pid, aid=self.val_aid, return_meta=True)
+            self.test_set = NTUDataset(self.test_X, self.test_Y, pid=self.test_pid, aid=self.test_aid, return_meta=True)
+        else:
+            self.train_set = NTUDataset(self.train_X, self.train_Y)
+            self.val_set = NTUDataset(self.val_X, self.val_Y)
+            self.test_set = NTUDataset(self.test_X, self.test_Y)
 
     def get_train_loader(self, batch_size, num_workers):
         if self.aug == 0:
@@ -104,20 +116,36 @@ class NTUDataLoaders(object):
         self.val_Y = np.argmax(f['valid_y'][:], -1)
         self.test_X = f['test_x'][:]
         self.test_Y = np.argmax(f['test_y'][:], -1)
+        self.train_pid = f['pid'][:] if 'pid' in f else None
+        self.train_aid = f['aid'][:] if 'aid' in f else None
+        self.val_pid = f['valid_pid'][:] if 'valid_pid' in f else None
+        self.val_aid = f['valid_aid'][:] if 'valid_aid' in f else None
+        self.test_pid = f['test_pid'][:] if 'test_pid' in f else None
+        self.test_aid = f['test_aid'][:] if 'test_aid' in f else None
         f.close()
 
         if self.metric == 'CS' or self.metric == 'CV' or self.metric == 'CR':
             self.train_X = np.concatenate([self.train_X, self.val_X], axis=0)
             self.train_Y = np.concatenate([self.train_Y, self.val_Y], axis=0)
+            if self.train_pid is not None and self.val_pid is not None:
+                self.train_pid = np.concatenate([self.train_pid, self.val_pid], axis=0)
+            if self.train_aid is not None and self.val_aid is not None:
+                self.train_aid = np.concatenate([self.train_aid, self.val_aid], axis=0)
             self.val_X = self.test_X
             self.val_Y = self.test_Y
+            self.val_pid = self.test_pid
+            self.val_aid = self.test_aid
         print('Dataset split:', self.dataset, self.metric, 'train', len(self.train_Y), 'val', len(self.val_Y), 'test', len(self.test_Y))
         print('Label coverage:', 'train', len(np.unique(self.train_Y)), 'val', len(np.unique(self.val_Y)), 'test', len(np.unique(self.test_Y)))
 
     def collate_fn_fix_train(self, batch):
         """Puts each data field into a tensor with outer dimension batch size
         """
-        x, y = zip(*batch)
+        if len(batch[0]) == 2:
+            x, y = zip(*batch)
+            pid, aid = None, None
+        else:
+            x, y, pid, aid = zip(*batch)
 
         if self.dataset == 'kinetics' and self.machine == 'philly':
             x = np.array(x)
@@ -159,12 +187,20 @@ class NTUDataLoaders(object):
         #### data augmentation
         y = torch.LongTensor(y)
 
+        if pid is not None and aid is not None and self.return_meta:
+            pid = torch.LongTensor(np.array(pid)[idx])
+            aid = torch.LongTensor(np.array(aid)[idx])
+            return [x, y, pid, aid]
         return [x, y]
 
     def collate_fn_fix_val(self, batch):
         """Puts each data field into a tensor with outer dimension batch size
         """
-        x, y = zip(*batch)
+        if len(batch[0]) == 2:
+            x, y = zip(*batch)
+            pid, aid = None, None
+        else:
+            x, y, pid, aid = zip(*batch)
         x, y = self.Tolist_fix(x, y, train=1)
         idx = range(len(x))
         y = np.array(y)
@@ -174,12 +210,20 @@ class NTUDataLoaders(object):
         #x = _view_normalize(x)
         y = torch.LongTensor(y)
 
+        if pid is not None and aid is not None and self.return_meta:
+            pid = torch.LongTensor(np.array(pid))
+            aid = torch.LongTensor(np.array(aid))
+            return [x, y, pid, aid]
         return [x, y]
 
     def collate_fn_fix_test(self, batch):
         """Puts each data field into a tensor with outer dimension batch size
         """
-        x, y = zip(*batch)
+        if len(batch[0]) == 2:
+            x, y = zip(*batch)
+            pid, aid = None, None
+        else:
+            x, y, pid, aid = zip(*batch)
         x, labels = self.Tolist_fix(x, y ,train=2)
         idx = range(len(x))
         y = np.array(y)
@@ -190,6 +234,10 @@ class NTUDataLoaders(object):
         #x = _view_normalize(x)
         y = torch.LongTensor(y)
 
+        if pid is not None and aid is not None and self.return_meta:
+            pid = torch.LongTensor(np.array(pid))
+            aid = torch.LongTensor(np.array(aid))
+            return [x, y, pid, aid]
         return [x, y]
 
     def Tolist_fix(self, joints, y, train = 1):

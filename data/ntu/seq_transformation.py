@@ -170,6 +170,9 @@ def split_dataset(skes_joints, label, performer, camera, evaluation, save_path):
     train_labels = label[train_indices]
     val_labels = label[val_indices]
     test_labels = label[test_indices]
+    train_pid = performer[train_indices] - 1
+    val_pid = performer[val_indices] - 1
+    test_pid = performer[test_indices] - 1
 
     # Save data into a .h5 file
     h5file = h5py.File(osp.join(save_path, 'NTU_%s.h5' % (evaluation)), 'w')
@@ -177,53 +180,77 @@ def split_dataset(skes_joints, label, performer, camera, evaluation, save_path):
     h5file.create_dataset('x', data=skes_joints[train_indices])
     train_one_hot_labels = one_hot_vector(train_labels)
     h5file.create_dataset('y', data=train_one_hot_labels)
+    h5file.create_dataset('pid', data=train_pid.astype(np.int16))
+    h5file.create_dataset('aid', data=train_labels.astype(np.int16))
     # Validation set
     h5file.create_dataset('valid_x', data=skes_joints[val_indices])
     val_one_hot_labels = one_hot_vector(val_labels)
     h5file.create_dataset('valid_y', data=val_one_hot_labels)
+    h5file.create_dataset('valid_pid', data=val_pid.astype(np.int16))
+    h5file.create_dataset('valid_aid', data=val_labels.astype(np.int16))
     # Test set
     h5file.create_dataset('test_x', data=skes_joints[test_indices])
     test_one_hot_labels = one_hot_vector(test_labels)
     h5file.create_dataset('test_y', data=test_one_hot_labels)
+    h5file.create_dataset('test_pid', data=test_pid.astype(np.int16))
+    h5file.create_dataset('test_aid', data=test_labels.astype(np.int16))
 
     h5file.close()
 
-def split_dataset_by_action(skes_joints, label, evaluation, save_path):
+def split_dataset_by_action(skes_joints, label, performer, evaluation, save_path):
     train_indices, test_indices = get_indices_by_action(label, evaluation)
     m = 'sklearn'
     train_indices, val_indices = split_train_val(train_indices, m)
     train_labels = label[train_indices]
     val_labels = label[val_indices]
     test_labels = label[test_indices]
+    train_pid = performer[train_indices] - 1
+    val_pid = performer[val_indices] - 1
+    test_pid = performer[test_indices] - 1
     h5file = h5py.File(osp.join(save_path, 'NTU_%s.h5' % (evaluation)), 'w')
     h5file.create_dataset('x', data=skes_joints[train_indices])
     train_one_hot_labels = one_hot_vector(train_labels)
     h5file.create_dataset('y', data=train_one_hot_labels)
+    h5file.create_dataset('pid', data=train_pid.astype(np.int16))
+    h5file.create_dataset('aid', data=train_labels.astype(np.int16))
     h5file.create_dataset('valid_x', data=skes_joints[val_indices])
     val_one_hot_labels = one_hot_vector(val_labels)
     h5file.create_dataset('valid_y', data=val_one_hot_labels)
+    h5file.create_dataset('valid_pid', data=val_pid.astype(np.int16))
+    h5file.create_dataset('valid_aid', data=val_labels.astype(np.int16))
     h5file.create_dataset('test_x', data=skes_joints[test_indices])
     test_one_hot_labels = one_hot_vector(test_labels)
     h5file.create_dataset('test_y', data=test_one_hot_labels)
+    h5file.create_dataset('test_pid', data=test_pid.astype(np.int16))
+    h5file.create_dataset('test_aid', data=test_labels.astype(np.int16))
     h5file.close()
 
-def split_dataset_id(skes_joints, performer, camera, evaluation, save_path):
+def split_dataset_id(skes_joints, performer, label, camera, evaluation, save_path):
     train_indices, test_indices = get_indices(performer, camera, evaluation)
     m = 'sklearn'
     train_indices, val_indices = split_train_val(train_indices, m)
     train_labels = performer[train_indices] - 1
     val_labels = performer[val_indices] - 1
     test_labels = performer[test_indices] - 1
+    train_aid = label[train_indices]
+    val_aid = label[val_indices]
+    test_aid = label[test_indices]
     h5file = h5py.File(osp.join(save_path, 'NTU_ID_%s.h5' % (evaluation)), 'w')
     h5file.create_dataset('x', data=skes_joints[train_indices])
     train_one_hot_labels = one_hot_vector_nc(train_labels, 40)
     h5file.create_dataset('y', data=train_one_hot_labels)
+    h5file.create_dataset('pid', data=train_labels.astype(np.int16))
+    h5file.create_dataset('aid', data=train_aid.astype(np.int16))
     h5file.create_dataset('valid_x', data=skes_joints[val_indices])
     val_one_hot_labels = one_hot_vector_nc(val_labels, 40)
     h5file.create_dataset('valid_y', data=val_one_hot_labels)
+    h5file.create_dataset('valid_pid', data=val_labels.astype(np.int16))
+    h5file.create_dataset('valid_aid', data=val_aid.astype(np.int16))
     h5file.create_dataset('test_x', data=skes_joints[test_indices])
     test_one_hot_labels = one_hot_vector_nc(test_labels, 40)
     h5file.create_dataset('test_y', data=test_one_hot_labels)
+    h5file.create_dataset('test_pid', data=test_labels.astype(np.int16))
+    h5file.create_dataset('test_aid', data=test_aid.astype(np.int16))
     h5file.close()
 
 def split_dataset_id_by_action(skes_joints, performer, label, evaluation, save_path):
@@ -233,16 +260,25 @@ def split_dataset_id_by_action(skes_joints, performer, label, evaluation, save_p
     train_labels = performer[train_indices] - 1
     val_labels = performer[val_indices] - 1
     test_labels = performer[test_indices] - 1
+    train_aid = label[train_indices]
+    val_aid = label[val_indices]
+    test_aid = label[test_indices]
     h5file = h5py.File(osp.join(save_path, 'NTU_ID_%s.h5' % (evaluation)), 'w')
     h5file.create_dataset('x', data=skes_joints[train_indices])
     train_one_hot_labels = one_hot_vector_nc(train_labels, 40)
     h5file.create_dataset('y', data=train_one_hot_labels)
+    h5file.create_dataset('pid', data=train_labels.astype(np.int16))
+    h5file.create_dataset('aid', data=train_aid.astype(np.int16))
     h5file.create_dataset('valid_x', data=skes_joints[val_indices])
     val_one_hot_labels = one_hot_vector_nc(val_labels, 40)
     h5file.create_dataset('valid_y', data=val_one_hot_labels)
+    h5file.create_dataset('valid_pid', data=val_labels.astype(np.int16))
+    h5file.create_dataset('valid_aid', data=val_aid.astype(np.int16))
     h5file.create_dataset('test_x', data=skes_joints[test_indices])
     test_one_hot_labels = one_hot_vector_nc(test_labels, 40)
     h5file.create_dataset('test_y', data=test_one_hot_labels)
+    h5file.create_dataset('test_pid', data=test_labels.astype(np.int16))
+    h5file.create_dataset('test_aid', data=test_aid.astype(np.int16))
     h5file.close()
 
 def get_indices_by_action(label, evaluation='CA'):
@@ -334,6 +370,6 @@ if __name__ == '__main__':
     evaluations = ['CS', 'CV', 'CR']
     for evaluation in evaluations:
         split_dataset(skes_joints, label, performer, camera, evaluation, save_path)
-        split_dataset_id(skes_joints, performer, camera, evaluation, save_path)
-    split_dataset_by_action(skes_joints, label, 'CA', save_path)
+        split_dataset_id(skes_joints, performer, label, camera, evaluation, save_path)
+    split_dataset_by_action(skes_joints, label, performer, 'CA', save_path)
     split_dataset_id_by_action(skes_joints, performer, label, 'CA', save_path)

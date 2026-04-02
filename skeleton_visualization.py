@@ -10,7 +10,7 @@ from util import get_num_classes
 
 def get_loader(args, split):
     try:
-        loaders = NTUDataLoaders(dataset=args.dataset, case=args.case, seg=args.seg, args=args)
+        loaders = NTUDataLoaders(dataset=args.dataset, case=args.case, seg=args.seg, args=args, return_meta=True)
     except TypeError:
         loaders = NTUDataLoaders(dataset=args.dataset, case=args.case, seg=args.seg)
     if split == "train":
@@ -26,8 +26,16 @@ def collect_features(model, loader, device, max_samples):
     handle = model.fc.register_forward_pre_hook(lambda m, inp: hook(m, inp))
     feats = []
     labels = []
+    pids = []
+    aids = []
     total = 0
-    for x, y in loader:
+    for batch in loader:
+        if isinstance(batch, (list, tuple)) and len(batch) >= 4:
+            x, y, pid, aid = batch[0], batch[1], batch[2], batch[3]
+            pids.append(pid.detach().cpu() if torch.is_tensor(pid) else torch.as_tensor(pid))
+            aids.append(aid.detach().cpu() if torch.is_tensor(aid) else torch.as_tensor(aid))
+        else:
+            x, y = batch[0], batch[1]
         x = x.to(device)
         with torch.no_grad():
             _ = model(x)
@@ -38,21 +46,31 @@ def collect_features(model, loader, device, max_samples):
         if max_samples and total >= max_samples:
             break
     handle.remove()
-    return torch.cat(feats, 0).numpy(), torch.cat(labels, 0).numpy()
+    X = torch.cat(feats, 0).numpy()
+    Y = torch.cat(labels, 0).numpy()
+    PID = torch.cat(pids, 0).numpy() if pids else None
+    AID = torch.cat(aids, 0).numpy() if aids else None
+    return X, Y, PID, AID
 
-def subsample_per_id(x, y, samples_per_id, seed):
-    if not samples_per_id:
-        return x, y
+def subsample_per_id(x, pid, aid, samples_per_id, seed):
+    if (not samples_per_id) or (pid is None):
+        return x, pid, aid
     rng = np.random.RandomState(seed)
     xs = []
-    ys = []
-    for pid in np.unique(y):
-        idx = np.where(y == pid)[0]
+    ps = []
+    ac = []
+    for _pid in np.unique(pid):
+        idx = np.where(pid == _pid)[0]
         if len(idx) > samples_per_id:
             idx = rng.choice(idx, samples_per_id, replace=False)
         xs.append(x[idx])
-        ys.append(y[idx])
-    return np.concatenate(xs, 0), np.concatenate(ys, 0)
+        ps.append(pid[idx])
+        if aid is not None:
+            ac.append(aid[idx])
+    x = np.concatenate(xs, 0)
+    pid = np.concatenate(ps, 0)
+    aid = np.concatenate(ac, 0) if ac else aid
+    return x, pid, aid
 
 def main():
     parser = argparse.ArgumentParser()
@@ -69,6 +87,7 @@ def main():
     parser.add_argument('--samples-per-id', type=int, default=100)
     parser.add_argument('--out', type=str, default='tsne_person.png')
     parser.add_argument('--motion-only', action='store_true')
+    parser.add_argument('--font-size', type=float, default=3.0)
     args = parser.parse_args()
 
     num_classes = get_num_classes(args.dataset)
@@ -86,9 +105,13 @@ def main():
         model.load_state_dict(state, strict=False)
 
     loader = get_loader(args, args.split)
-    X, Y = collect_features(model, loader, device, args.max_samples)
-    X, Y = subsample_per_id(X, Y, args.samples_per_id, args.seed)
-    ids, counts = np.unique(Y, return_counts=True)
+    X, Y, PID, AID = collect_features(model, loader, device, args.max_samples)
+    if PID is None:
+        PID = Y
+    if AID is None:
+        AID = np.full_like(PID, -1)
+    X, PID, AID = subsample_per_id(X, PID, AID, args.samples_per_id, args.seed)
+    ids, counts = np.unique(PID, return_counts=True)
     for pid, cnt in zip(ids, counts):
         print(f'person {int(pid)}: {int(cnt)} samples')
 
@@ -99,11 +122,13 @@ def main():
     Z = tsne.fit_transform(X)
 
     plt.figure(figsize=(8, 6))
-    ids = np.unique(Y)
+    ids = np.unique(PID)
     cmap = plt.cm.get_cmap('tab20', len(ids))
     for i, pid in enumerate(ids):
-        idx = np.where(Y == pid)[0]
+        idx = np.where(PID == pid)[0]
         plt.scatter(Z[idx, 0], Z[idx, 1], s=6, alpha=0.7, color=cmap(i))
+    for j in range(Z.shape[0]):
+        plt.text(Z[j, 0], Z[j, 1], f'{int(PID[j])},{int(AID[j])}', fontsize=args.font_size, alpha=0.8)
     plt.tight_layout()
     plt.savefig(args.out, dpi=200)
 
