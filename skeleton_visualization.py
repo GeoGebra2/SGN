@@ -141,28 +141,36 @@ def save_tsne_html(Z, pid, aid, out_html):
     const innerW = W - margin.left - margin.right;
     const innerH = H - margin.top - margin.bottom;
 
-    const x = d3.scaleLinear().domain([{x_min - pad_x}, {x_max + pad_x}]).range([0, innerW]);
-    const y = d3.scaleLinear().domain([{y_min - pad_y}, {y_max + pad_y}]).range([innerH, 0]);
+    const x0 = d3.scaleLinear().domain([{x_min - pad_x}, {x_max + pad_x}]).range([0, innerW]);
+    const y0 = d3.scaleLinear().domain([{y_min - pad_y}, {y_max + pad_y}]).range([innerH, 0]);
 
     const g = svg.append("g").attr("transform", "translate(" + margin.left + "," + margin.top + ")");
 
-    g.append("g")
-      .attr("transform", "translate(0," + innerH + ")")
-      .call(d3.axisBottom(x).ticks(6))
-      .call(g => g.selectAll("text").attr("font-size", 11));
+    const defs = svg.append("defs");
+    defs.append("clipPath")
+      .attr("id", "clip")
+      .append("rect")
+      .attr("x", margin.left)
+      .attr("y", margin.top)
+      .attr("width", innerW)
+      .attr("height", innerH);
 
-    g.append("g")
-      .call(d3.axisLeft(y).ticks(6))
-      .call(g => g.selectAll("text").attr("font-size", 11));
+    const xAxisG = g.append("g").attr("transform", "translate(0," + innerH + ")");
+    const yAxisG = g.append("g");
 
-    const dots = g.append("g")
+    xAxisG.call(d3.axisBottom(x0).ticks(6)).call(g => g.selectAll("text").attr("font-size", 11));
+    yAxisG.call(d3.axisLeft(y0).ticks(6)).call(g => g.selectAll("text").attr("font-size", 11));
+
+    const plot = g.append("g").attr("clip-path", "url(#clip)");
+
+    const dots = plot.append("g")
       .selectAll("circle")
       .data(points)
       .enter()
       .append("circle")
       .attr("class", "dot")
-      .attr("cx", d => x(d.x))
-      .attr("cy", d => y(d.y))
+      .attr("cx", d => x0(d.x))
+      .attr("cy", d => y0(d.y))
       .attr("r", 2.5)
       .attr("fill", d => d.color)
       .attr("fill-opacity", 0.75);
@@ -180,6 +188,26 @@ def save_tsne_html(Z, pid, aid, out_html):
       .on("mousemove", onMove)
       .on("mouseenter", onMove)
       .on("mouseleave", () => tooltip.style("display", "none"));
+
+    function zoomed(event) {{
+      tooltip.style("display", "none");
+      const t = event.transform;
+      const xz = t.rescaleX(x0);
+      const yz = t.rescaleY(y0);
+      dots
+        .attr("cx", d => xz(d.x))
+        .attr("cy", d => yz(d.y));
+      xAxisG.call(d3.axisBottom(xz).ticks(6)).call(g => g.selectAll("text").attr("font-size", 11));
+      yAxisG.call(d3.axisLeft(yz).ticks(6)).call(g => g.selectAll("text").attr("font-size", 11));
+    }}
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.5, 20])
+      .translateExtent([[0, 0], [W, H]])
+      .extent([[0, 0], [W, H]])
+      .on("zoom", zoomed);
+
+    svg.call(zoom);
   </script>
 </body>
 </html>
