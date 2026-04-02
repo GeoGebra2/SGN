@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from sklearn.manifold import TSNE
 from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 
 from model import SGN
@@ -193,7 +194,7 @@ def _pairwise_distances(x):
     d = np.sqrt(np.sum(diffs * diffs, axis=-1))
     return d
 
-def analyze_action_clusters(Z, pid, aid, eps, min_action_samples, min_actions_per_cluster, min_samples):
+def analyze_action_centroid_clusters(Z, pid, aid, eps, min_action_samples, min_actions_per_cluster, min_samples):
     Z = np.asarray(Z)
     pid = np.asarray(pid)
     aid = np.asarray(aid)
@@ -269,6 +270,67 @@ def analyze_action_clusters(Z, pid, aid, eps, min_action_samples, min_actions_pe
 
     return results
 
+def analyze_point_clusters(Z, pid, aid, eps, min_points_per_action, min_actions_per_cluster, min_samples, min_cluster_points):
+    Z = np.asarray(Z, dtype=np.float64)
+    pid = np.asarray(pid)
+    aid = np.asarray(aid)
+
+    results = {}
+    for p in np.unique(pid):
+        mask_p = pid == p
+        Z_p = Z[mask_p]
+        aid_p = aid[mask_p]
+
+        if Z_p.shape[0] < max(min_samples, min_cluster_points):
+            continue
+
+        used_eps = eps
+        if (used_eps is None) or (used_eps <= 0):
+            k = min(min_samples + 1, Z_p.shape[0])
+            nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
+            nn.fit(Z_p)
+            dists, _ = nn.kneighbors(Z_p, return_distance=True)
+            kth = dists[:, -1]
+            med = float(np.median(kth))
+            used_eps = med * 1.2
+            if used_eps <= 0:
+                used_eps = float(np.mean(kth)) * 1.2
+
+        if used_eps <= 0:
+            continue
+
+        db = DBSCAN(eps=used_eps, min_samples=min_samples)
+        labels = db.fit_predict(Z_p)
+
+        clusters = {}
+        for lab in np.unique(labels):
+            if lab == -1:
+                continue
+            idx = np.where(labels == lab)[0]
+            if idx.size < min_cluster_points:
+                continue
+            acts, counts = np.unique(aid_p[idx], return_counts=True)
+            act_counts = {int(a): int(c) for a, c in zip(acts, counts) if int(c) >= int(min_points_per_action)}
+            if len(act_counts) < min_actions_per_cluster:
+                continue
+            clusters[int(lab)] = {
+                "n_points": int(idx.size),
+                "actions": sorted(act_counts.keys()),
+                "action_counts": {k: act_counts[k] for k in sorted(act_counts.keys())},
+            }
+
+        if clusters:
+            results[int(p)] = {
+                "eps": float(used_eps),
+                "min_samples": int(min_samples),
+                "min_cluster_points": int(min_cluster_points),
+                "min_points_per_action": int(min_points_per_action),
+                "min_actions_per_cluster": int(min_actions_per_cluster),
+                "clusters": clusters,
+            }
+
+    return results
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='NTU_ID')
@@ -287,10 +349,12 @@ def main():
     parser.add_argument('--motion-only', action='store_true')
     parser.add_argument('--font-size', type=float, default=3.0)
     parser.add_argument('--no-cluster-stats', action='store_true')
+    parser.add_argument('--cluster-mode', type=str, default='points', choices=['points', 'centroid'])
     parser.add_argument('--cluster-eps', type=float, default=0.0)
-    parser.add_argument('--cluster-min-action-samples', type=int, default=5)
+    parser.add_argument('--cluster-min-action-samples', type=int, default=1)
     parser.add_argument('--cluster-min-actions', type=int, default=2)
     parser.add_argument('--cluster-min-samples', type=int, default=2)
+    parser.add_argument('--cluster-min-points', type=int, default=2)
     parser.add_argument('--cluster-out', type=str, default='')
     args = parser.parse_args()
 
@@ -326,26 +390,49 @@ def main():
     Z = tsne.fit_transform(X)
 
     if not args.no_cluster_stats:
-        stats = analyze_action_clusters(
-            Z,
-            PID,
-            AID,
-            eps=args.cluster_eps,
-            min_action_samples=args.cluster_min_action_samples,
-            min_actions_per_cluster=args.cluster_min_actions,
-            min_samples=args.cluster_min_samples,
-        )
-        for p in sorted(stats.keys()):
-            info = stats[p]
-            print(f'person {p}: eps={info["eps"]:.4f} clusters={len(info["clusters"])}')
-            for lab in sorted(info["clusters"].keys()):
-                c = info["clusters"][lab]
-                acts = ",".join(str(a) for a in c["actions"])
-                print(
-                    f'  cluster {lab}: actions=[{acts}] '
-                    f'mean_d={c["centroid_dist_mean"]:.4f} max_d={c["centroid_dist_max"]:.4f} '
-                    f'counts={c["action_counts"]}'
-                )
+        if np.all(AID == -1):
+            print('cluster stats skipped: missing action id (AID == -1). regenerate .h5 with aid fields.')
+            stats = {}
+        elif args.cluster_mode == 'centroid':
+            stats = analyze_action_centroid_clusters(
+                Z,
+                PID,
+                AID,
+                eps=args.cluster_eps,
+                min_action_samples=args.cluster_min_action_samples,
+                min_actions_per_cluster=args.cluster_min_actions,
+                min_samples=args.cluster_min_samples,
+            )
+        else:
+            stats = analyze_point_clusters(
+                Z,
+                PID,
+                AID,
+                eps=args.cluster_eps,
+                min_points_per_action=args.cluster_min_action_samples,
+                min_actions_per_cluster=args.cluster_min_actions,
+                min_samples=args.cluster_min_samples,
+                min_cluster_points=args.cluster_min_points,
+            )
+
+        if stats:
+            for p in sorted(stats.keys()):
+                info = stats[p]
+                print(f'person {p}: eps={info["eps"]:.4f} clusters={len(info["clusters"])}')
+                for lab in sorted(info["clusters"].keys()):
+                    c = info["clusters"][lab]
+                    acts = ",".join(str(a) for a in c["actions"])
+                    if args.cluster_mode == 'centroid':
+                        print(
+                            f'  cluster {lab}: actions=[{acts}] '
+                            f'mean_d={c["centroid_dist_mean"]:.4f} max_d={c["centroid_dist_max"]:.4f} '
+                            f'counts={c["action_counts"]}'
+                        )
+                    else:
+                        print(f'  cluster {lab}: n_points={c["n_points"]} actions=[{acts}] counts={c["action_counts"]}')
+        else:
+            if not np.all(AID == -1):
+                print('no clusters found. try --cluster-eps (smaller or larger) or lower --cluster-min-points / --cluster-min-action-samples.')
         if args.cluster_out:
             with open(args.cluster_out, "w", encoding="utf-8") as f:
                 json.dump(stats, f, ensure_ascii=False, indent=2)
