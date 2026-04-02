@@ -3,6 +3,7 @@ import json
 import torch
 import numpy as np
 from sklearn.manifold import TSNE
+from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
 
 from model import SGN
@@ -186,6 +187,88 @@ def save_tsne_html(Z, pid, aid, out_html):
     with open(out_html, "w", encoding="utf-8") as f:
         f.write(html)
 
+def _pairwise_distances(x):
+    x = np.asarray(x, dtype=np.float64)
+    diffs = x[:, None, :] - x[None, :, :]
+    d = np.sqrt(np.sum(diffs * diffs, axis=-1))
+    return d
+
+def analyze_action_clusters(Z, pid, aid, eps, min_action_samples, min_actions_per_cluster, min_samples):
+    Z = np.asarray(Z)
+    pid = np.asarray(pid)
+    aid = np.asarray(aid)
+
+    results = {}
+    for p in np.unique(pid):
+        mask_p = pid == p
+        aids_p = aid[mask_p]
+        Z_p = Z[mask_p]
+
+        centroids = []
+        action_ids = []
+        action_counts = {}
+        for a in np.unique(aids_p):
+            mask_a = aids_p == a
+            cnt = int(mask_a.sum())
+            action_counts[int(a)] = cnt
+            if cnt < min_action_samples:
+                continue
+            action_ids.append(int(a))
+            centroids.append(Z_p[mask_a].mean(axis=0))
+
+        if len(action_ids) < 2:
+            continue
+
+        centroids = np.asarray(centroids, dtype=np.float64)
+        used_eps = eps
+        if (used_eps is None) or (used_eps <= 0):
+            d = _pairwise_distances(centroids)
+            tri = d[np.triu_indices(d.shape[0], k=1)]
+            if tri.size == 0:
+                used_eps = 0.0
+            else:
+                med = float(np.median(tri))
+                used_eps = med * 0.5
+                if used_eps <= 0:
+                    used_eps = float(np.mean(tri)) * 0.5
+
+        if used_eps <= 0:
+            continue
+
+        db = DBSCAN(eps=used_eps, min_samples=min_samples)
+        labels = db.fit_predict(centroids)
+
+        clusters = {}
+        for idx, lab in enumerate(labels):
+            if lab == -1:
+                continue
+            clusters.setdefault(int(lab), []).append(int(action_ids[idx]))
+
+        kept = {}
+        for lab, acts in clusters.items():
+            if len(acts) < min_actions_per_cluster:
+                continue
+            idxs = [action_ids.index(a) for a in acts]
+            c = centroids[idxs]
+            d = _pairwise_distances(c)
+            tri = d[np.triu_indices(d.shape[0], k=1)]
+            kept[int(lab)] = {
+                "actions": sorted(acts),
+                "action_counts": {int(a): action_counts[int(a)] for a in acts},
+                "centroid_dist_mean": float(tri.mean()) if tri.size else 0.0,
+                "centroid_dist_max": float(tri.max()) if tri.size else 0.0,
+            }
+
+        if kept:
+            results[int(p)] = {
+                "eps": float(used_eps),
+                "min_action_samples": int(min_action_samples),
+                "min_actions_per_cluster": int(min_actions_per_cluster),
+                "clusters": kept,
+            }
+
+    return results
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='NTU_ID')
@@ -203,6 +286,12 @@ def main():
     parser.add_argument('--out-html', type=str, default='')
     parser.add_argument('--motion-only', action='store_true')
     parser.add_argument('--font-size', type=float, default=3.0)
+    parser.add_argument('--no-cluster-stats', action='store_true')
+    parser.add_argument('--cluster-eps', type=float, default=0.0)
+    parser.add_argument('--cluster-min-action-samples', type=int, default=5)
+    parser.add_argument('--cluster-min-actions', type=int, default=2)
+    parser.add_argument('--cluster-min-samples', type=int, default=2)
+    parser.add_argument('--cluster-out', type=str, default='')
     args = parser.parse_args()
 
     num_classes = get_num_classes(args.dataset)
@@ -235,6 +324,31 @@ def main():
     perplexity = min(args.perplexity, max_p)
     tsne = TSNE(n_components=2, perplexity=perplexity, random_state=args.seed, init='random')
     Z = tsne.fit_transform(X)
+
+    if not args.no_cluster_stats:
+        stats = analyze_action_clusters(
+            Z,
+            PID,
+            AID,
+            eps=args.cluster_eps,
+            min_action_samples=args.cluster_min_action_samples,
+            min_actions_per_cluster=args.cluster_min_actions,
+            min_samples=args.cluster_min_samples,
+        )
+        for p in sorted(stats.keys()):
+            info = stats[p]
+            print(f'person {p}: eps={info["eps"]:.4f} clusters={len(info["clusters"])}')
+            for lab in sorted(info["clusters"].keys()):
+                c = info["clusters"][lab]
+                acts = ",".join(str(a) for a in c["actions"])
+                print(
+                    f'  cluster {lab}: actions=[{acts}] '
+                    f'mean_d={c["centroid_dist_mean"]:.4f} max_d={c["centroid_dist_max"]:.4f} '
+                    f'counts={c["action_counts"]}'
+                )
+        if args.cluster_out:
+            with open(args.cluster_out, "w", encoding="utf-8") as f:
+                json.dump(stats, f, ensure_ascii=False, indent=2)
 
     if args.out_html:
         save_tsne_html(Z, PID, AID, args.out_html)
