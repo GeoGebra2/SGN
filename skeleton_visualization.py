@@ -171,7 +171,7 @@ def save_tsne_html(Z, pid, aid, out_html):
         .style("display", "block")
         .style("left", (event.clientX - rect.left + 12) + "px")
         .style("top", (event.clientY - rect.top + 12) + "px")
-        .html(`pid: <b>${d.pid}</b><br/>aid: <b>${d.aid}</b>`);
+        .html("pid: <b>" + d.pid + "</b><br/>aid: <b>" + d.aid + "</b>");
     }}
 
     dots
