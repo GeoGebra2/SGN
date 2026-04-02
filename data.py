@@ -135,8 +135,19 @@ class NTUDataLoaders(object):
             self.val_Y = self.test_Y
             self.val_pid = self.test_pid
             self.val_aid = self.test_aid
+
+        all_y = np.unique(np.concatenate([self.train_Y, self.val_Y, self.test_Y], axis=0))
+        self.class_ids = all_y.astype(int)
+        self.label_map = {int(old): int(i) for i, old in enumerate(self.class_ids)}
+        self.num_classes = int(len(self.class_ids))
+        if self.num_classes > 0 and (self.class_ids.min() != 0 or self.class_ids.max() != self.num_classes - 1):
+            remap = np.vectorize(lambda v: self.label_map[int(v)], otypes=[int])
+            self.train_Y = remap(self.train_Y)
+            self.val_Y = remap(self.val_Y)
+            self.test_Y = remap(self.test_Y)
         print('Dataset split:', self.dataset, self.metric, 'train', len(self.train_Y), 'val', len(self.val_Y), 'test', len(self.test_Y))
         print('Label coverage:', 'train', len(np.unique(self.train_Y)), 'val', len(np.unique(self.val_Y)), 'test', len(np.unique(self.test_Y)))
+        print('Num classes:', self.num_classes)
 
     def collate_fn_fix_train(self, batch):
         """Puts each data field into a tensor with outer dimension batch size

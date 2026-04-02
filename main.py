@@ -41,8 +41,8 @@ parser.set_defaults(
 args = parser.parse_args()
 
 def main():
-
-    args.num_classes = get_num_classes(args.dataset)
+    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
+    args.num_classes = getattr(ntu_loaders, 'num_classes', None) or get_num_classes(args.dataset)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
 
     total = get_n_params(model)
@@ -70,7 +70,6 @@ def main():
 
     scheduler = MultiStepLR(optimizer, milestones=[60, 90, 110], gamma=0.1)
     # Data loading
-    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg)
     train_loader = ntu_loaders.get_train_loader(args.batch_size, args.workers)
     val_loader = ntu_loaders.get_val_loader(args.batch_size, args.workers)
     train_size = ntu_loaders.get_train_size()
