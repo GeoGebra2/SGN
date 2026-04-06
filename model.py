@@ -314,13 +314,18 @@ class motion_primitives_layer(nn.Module):
             primitive_scales = [primitive_scales]
         self.primitive_scales = [max(1, int(s)) for s in primitive_scales]
         self.branches = nn.ModuleList([motion_primitive_branch(dim, s, bias=bias) for s in self.primitive_scales])
-        self.fuse = nn.Conv2d(dim * len(self.primitive_scales), dim, kernel_size=1, bias=bias)
+        self.gate = nn.Conv2d(dim * (len(self.primitive_scales) + 1), len(self.primitive_scales), kernel_size=1, bias=bias)
+        self.softmax = nn.Softmax(dim=1)
+        self.out_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
 
     def forward(self, x):
         outs = [branch(x) for branch in self.branches]
-        if len(outs) == 1:
-            return outs[0] + x
-        out = self.fuse(torch.cat(outs, dim=1)) + x
+        gate_in = torch.cat([x] + outs, dim=1)
+        alpha = self.softmax(self.gate(gate_in))
+        out = 0
+        for i, feat in enumerate(outs):
+            out = out + alpha[:, i:i+1, :, :] * feat
+        out = self.out_proj(out) + x
         return out
 
 class motion_primitive_branch(nn.Module):
