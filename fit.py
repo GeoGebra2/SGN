@@ -36,6 +36,14 @@ def add_fit_args(parser):
                       help='quantity to monitor (default: val_acc)')
     args.add_argument('--seg', type=int, default=20,
                       help='number of segmentation')
+    args.add_argument('--warmup-epochs', type=int, default=5,
+                      help='number of warmup epochs for lr scheduling')
+    args.add_argument('--ema-decay', type=float, default=0.999,
+                      help='ema decay for model weights')
+    args.add_argument('--no-ema-eval', action='store_true',
+                      help='disable evaluating with EMA model')
+    args.add_argument('--tta-clips', type=int, default=5,
+                      help='number of temporal clips for test-time augmentation')
     args.add_argument('--motion-only', action='store_true',
                       help='use motion-only input (velocity/acceleration)')
     args.add_argument('--num-primitives', type=int, default=4,

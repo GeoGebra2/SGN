@@ -43,6 +43,7 @@ class NTUDataLoaders(object):
         self.args = args
         self.return_meta = return_meta
         self.drop_two_person = bool(getattr(args, 'drop_two_person', False)) if args is not None else False
+        self.tta_clips = max(1, int(getattr(args, 'tta_clips', 5))) if args is not None else 5
         self.create_datasets()
         if self.return_meta:
             self.train_set = NTUDataset(self.train_X, self.train_Y, pid=self.train_pid, aid=self.train_aid, return_meta=True)
@@ -312,17 +313,9 @@ class NTUDataLoaders(object):
             seqs.append(seq)
 
         elif train == 2:
-            offsets1 = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
-            offsets2 = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
-            offsets3 = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
-            offsets4 = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
-            offsets5 = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
-
-            seqs.append(seq[offsets1])
-            seqs.append(seq[offsets2])
-            seqs.append(seq[offsets3])
-            seqs.append(seq[offsets4])
-            seqs.append(seq[offsets5])
+            for _ in range(self.tta_clips):
+                offsets = np.multiply(list(range(group)), ave_duration) + np.random.randint(ave_duration, size=group)
+                seqs.append(seq[offsets])
 
         return seqs
 

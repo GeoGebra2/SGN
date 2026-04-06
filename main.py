@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau, MultiStepLR
+from torch.optim.lr_scheduler import LambdaLR
 from model import SGN
 from data import NTUDataLoaders, AverageMeter
 import fit
@@ -56,6 +56,7 @@ def main():
 
     criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    ema = ModelEMA(model, decay=args.ema_decay) if args.ema_decay > 0 else None
 
     if args.monitor == 'val_acc':
         mode = 'max'
@@ -68,7 +69,10 @@ def main():
         best = np.inf
         str_op = 'reduce'
 
-    scheduler = MultiStepLR(optimizer, milestones=[60, 90, 110], gamma=0.1)
+    scheduler = LambdaLR(
+        optimizer,
+        lr_lambda=lambda epoch: lr_lambda_warmup_cosine(epoch, args.max_epochs, args.warmup_epochs)
+    )
     # Data loading
     train_loader = ntu_loaders.get_train_loader(args.batch_size, args.workers)
     val_loader = ntu_loaders.get_val_loader(args.batch_size, args.workers)
@@ -102,8 +106,9 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, model, criterion)
+            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch, ema=ema)
+            eval_model = ema.ema if (ema is not None and not args.no_ema_eval) else model
+            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, eval_model, criterion)
             log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
                          val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5)]]
 
@@ -127,6 +132,7 @@ def main():
                 save_checkpoint({
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
+                    'ema_state_dict': None if ema is None else ema.ema.state_dict(),
                     'best': best,
                     'monitor': args.monitor,
                     'optimizer': optimizer.state_dict(),
@@ -149,10 +155,10 @@ def main():
     args.train = 0
     model = SGN(args.num_classes, args.dataset, args.seg, args)
     model = model.cuda()
-    test(test_loader, model, checkpoint, lable_path, pred_path)
+    test(test_loader, model, checkpoint, lable_path, pred_path, use_ema=(not args.no_ema_eval))
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, ema=None):
     losses = AverageMeter()
     acc1 = AverageMeter()
     acc2 = AverageMeter()
@@ -185,6 +191,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if ema is not None:
+            ema.update(model)
 
         if (i + 1) % args.print_freq == 0:
             print('Epoch-{:<3d} {:3d} batches\t'
@@ -227,14 +235,18 @@ def validate(val_loader, model, criterion):
     return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
 
 
-def test(test_loader, model, checkpoint, lable_path, pred_path):
+def test(test_loader, model, checkpoint, lable_path, pred_path, use_ema=True):
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
     acc4 = AverageMeter()
     acc5 = AverageMeter()
     # load learnt model that obtained best performance on validation set
-    model.load_state_dict(torch.load(checkpoint)['state_dict'])
+    ckpt = torch.load(checkpoint)
+    if use_ema and ('ema_state_dict' in ckpt) and (ckpt['ema_state_dict'] is not None):
+        model.load_state_dict(ckpt['ema_state_dict'])
+    else:
+        model.load_state_dict(ckpt['state_dict'])
     model.eval()
 
     label_output = list()
@@ -283,6 +295,34 @@ def save_checkpoint(state, filename='checkpoint.pth.tar', is_best=False):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
+def lr_lambda_warmup_cosine(epoch, max_epochs, warmup_epochs):
+    max_epochs = max(1, int(max_epochs))
+    warmup_epochs = max(0, int(warmup_epochs))
+    if warmup_epochs > 0 and epoch < warmup_epochs:
+        return float(epoch + 1) / float(warmup_epochs)
+    progress_denom = max(1, max_epochs - warmup_epochs)
+    progress = float(epoch - warmup_epochs) / float(progress_denom)
+    progress = min(1.0, max(0.0, progress))
+    return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+class ModelEMA(object):
+    def __init__(self, model, decay=0.999):
+        self.decay = float(decay)
+        self.ema = SGN(args.num_classes, args.dataset, args.seg, args).cuda()
+        self.ema.load_state_dict(model.state_dict())
+        self.ema.eval()
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    def update(self, model):
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, v in self.ema.state_dict().items():
+                if not v.dtype.is_floating_point:
+                    v.copy_(msd[k])
+                else:
+                    v.copy_(v * self.decay + msd[k] * (1.0 - self.decay))
 
 def get_n_params(model):
     pp=0
