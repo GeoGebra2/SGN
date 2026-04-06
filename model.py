@@ -16,6 +16,10 @@ class SGN(nn.Module):
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
         self.spa_embed = embed(num_joint, 64, norm=False, bias=bias)
+        self.num_part = 10
+        self.num_body = 5
+        self.spa_embed_part = embed(self.num_part, 64, norm=False, bias=bias)
+        self.spa_embed_body = embed(self.num_body, 64, norm=False, bias=bias)
         self.joint_embed = embed(3, 64, norm=True, bias=bias)
         self.dif_embed = embed(3, 64, norm=True, bias=bias)
         self.acc_embed = embed(3, 64, norm=True, bias=bias)
@@ -27,7 +31,21 @@ class SGN(nn.Module):
         self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.compute_g_part = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_part1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
+        self.gcn_part2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_part3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.compute_g_body = compute_g_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_body1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
+        self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
+        self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
+
+        j2p_map, p2j_map, j2b_map, b2j_map = self._build_level_maps(num_joint)
+        self.register_buffer('j2p_map', j2p_map)
+        self.register_buffer('p2j_map', p2j_map)
+        self.register_buffer('j2b_map', j2b_map)
+        self.register_buffer('b2j_map', b2j_map)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -37,6 +55,49 @@ class SGN(nn.Module):
         nn.init.constant_(self.gcn1.w.cnn.weight, 0)
         nn.init.constant_(self.gcn2.w.cnn.weight, 0)
         nn.init.constant_(self.gcn3.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_part1.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_part2.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_part3.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_body1.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_body2.w.cnn.weight, 0)
+        nn.init.constant_(self.gcn_body3.w.cnn.weight, 0)
+
+
+    def _build_level_maps(self, num_joint):
+        part_groups = [
+            [12, 13],
+            [14, 15],
+            [16, 17],
+            [18, 19],
+            [0, 1],
+            [2, 3, 20],
+            [4, 5],
+            [6, 7, 21, 22],
+            [8, 9],
+            [10, 11, 23, 24],
+        ]
+        body_groups = [
+            [12, 13, 14, 15],
+            [16, 17, 18, 19],
+            [0, 1, 2, 3, 20],
+            [4, 5, 6, 7, 21, 22],
+            [8, 9, 10, 11, 23, 24],
+        ]
+        j2p = torch.zeros(len(part_groups), num_joint)
+        j2b = torch.zeros(len(body_groups), num_joint)
+        p2j = torch.zeros(num_joint, len(part_groups))
+        b2j = torch.zeros(num_joint, len(body_groups))
+        for p, joints in enumerate(part_groups):
+            for j in joints:
+                if j < num_joint:
+                    j2p[p, j] = 1.0 / len(joints)
+                    p2j[j, p] = 1.0
+        for b, joints in enumerate(body_groups):
+            for j in joints:
+                if j < num_joint:
+                    j2b[b, j] = 1.0 / len(joints)
+                    b2j[j, b] = 1.0
+        return j2p, p2j, j2b, b2j
 
 
     def forward_features(self, input):
@@ -62,12 +123,30 @@ class SGN(nn.Module):
         else:
             pos = self.joint_embed(input)
             dy = pos + dif
-        # Joint-level Module
-        input= torch.cat([dy, spa1], 1)
-        g = self.compute_g1(input)
-        input = self.gcn1(input, g)
-        input = self.gcn2(input, g)
-        input = self.gcn3(input, g)
+        dy_part = torch.einsum('bcjt,pj->bcpt', dy, self.j2p_map)
+        dy_body = torch.einsum('bcjt,kj->bckt', dy, self.j2b_map)
+        spa_part = self.one_hot(bs, self.num_part, step).permute(0, 3, 2, 1).to(input.device)
+        spa_body = self.one_hot(bs, self.num_body, step).permute(0, 3, 2, 1).to(input.device)
+        spa_part = self.spa_embed_part(spa_part)
+        spa_body = self.spa_embed_body(spa_body)
+        input_joint = torch.cat([dy, spa1], 1)
+        g_joint = self.compute_g1(input_joint)
+        input_joint = self.gcn1(input_joint, g_joint)
+        input_joint = self.gcn2(input_joint, g_joint)
+        input_joint = self.gcn3(input_joint, g_joint)
+        input_part = torch.cat([dy_part, spa_part], 1)
+        g_part = self.compute_g_part(input_part)
+        input_part = self.gcn_part1(input_part, g_part)
+        input_part = self.gcn_part2(input_part, g_part)
+        input_part = self.gcn_part3(input_part, g_part)
+        input_body = torch.cat([dy_body, spa_body], 1)
+        g_body = self.compute_g_body(input_body)
+        input_body = self.gcn_body1(input_body, g_body)
+        input_body = self.gcn_body2(input_body, g_body)
+        input_body = self.gcn_body3(input_body, g_body)
+        part_to_joint = torch.einsum('bcpt,jp->bcjt', input_part, self.p2j_map)
+        body_to_joint = torch.einsum('bckt,jk->bcjt', input_body, self.b2j_map)
+        input = (input_joint + part_to_joint + body_to_joint) / 3.0
         # Frame-level Module
         input = input + tem1
         input = self.cnn(input)
