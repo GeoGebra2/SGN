@@ -38,6 +38,8 @@ def add_fit_args(parser):
                       help='number of segmentation')
     args.add_argument('--motion-only', action='store_true',
                       help='use motion-only input (velocity/acceleration)')
+    args.add_argument('--num-primitives', type=int, default=4,
+                      help='number of motion primitives for temporal segment abstraction')
     args.add_argument('--drop-two-person', action='store_true',
                       help='drop two-person interaction actions in NTU (A050-A060)')
     args.add_argument('--metric-loss', type=str, default='none', choices=['none', 'supcon', 'triplet'])

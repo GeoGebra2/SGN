@@ -12,6 +12,7 @@ class SGN(nn.Module):
         self.dataset = dataset
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
+        self.num_primitives = max(1, int(getattr(args, "num_primitives", 4)))
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -40,6 +41,7 @@ class SGN(nn.Module):
         self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.cross_fusion = cross_level_fusion(self.dim1, bias=bias)
+        self.primitive_layer = motion_primitives_layer(self.dim1, self.num_primitives, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
 
         j2p_map, p2j_map, j2b_map, b2j_map = self._build_level_maps(num_joint)
@@ -150,6 +152,7 @@ class SGN(nn.Module):
         input = self.cross_fusion(input_joint, part_to_joint, body_to_joint)
         # Frame-level Module
         input = input + tem1
+        input = self.primitive_layer(input)
         input = self.cnn(input)
         input = self.temporal(input)
         input = self.temporal_att(input)
@@ -289,6 +292,26 @@ class temporal_attention(nn.Module):
         att = torch.softmax(att, dim=-1)
         x = x * att.unsqueeze(2)
         return x
+
+class motion_primitives_layer(nn.Module):
+    def __init__(self, dim, num_primitives=4, bias=False):
+        super(motion_primitives_layer, self).__init__()
+        self.num_primitives = max(1, int(num_primitives))
+        self.proto_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.frame_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.out_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        proto = torch.nn.functional.adaptive_avg_pool2d(x, (x.size(2), self.num_primitives))
+        proto = self.proto_proj(proto)
+        q = self.frame_proj(x).permute(0, 2, 3, 1).contiguous()
+        k = proto.permute(0, 2, 1, 3).contiguous()
+        att = torch.matmul(q, k) / math.sqrt(max(1, q.size(-1)))
+        att = torch.softmax(att, dim=-1)
+        v = proto.permute(0, 2, 3, 1).contiguous()
+        msg = torch.matmul(att, v).permute(0, 3, 1, 2).contiguous()
+        out = self.out_proj(msg) + x
+        return out
 
 class cross_level_fusion(nn.Module):
     def __init__(self, dim, bias=False):
