@@ -41,6 +41,7 @@ class SGN(nn.Module):
         self.gcn_body1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.level_interaction = hierarchical_level_interaction(self.dim1, bias=bias)
         self.cross_fusion = cross_level_fusion(self.dim1, bias=bias)
         self.primitive_layer = motion_primitives_layer(self.dim1, self.primitive_scales, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
@@ -161,6 +162,9 @@ class SGN(nn.Module):
         input_body = self.gcn_body1(input_body, g_body)
         input_body = self.gcn_body2(input_body, g_body)
         input_body = self.gcn_body3(input_body, g_body)
+        input_joint, input_part, input_body = self.level_interaction(
+            input_joint, input_part, input_body, self.j2p_map, self.p2j_map, self.j2b_map, self.b2j_map
+        )
         part_to_joint = torch.einsum('bcpt,jp->bcjt', input_part, self.p2j_map)
         body_to_joint = torch.einsum('bckt,jk->bcjt', input_body, self.b2j_map)
         input = self.cross_fusion(input_joint, part_to_joint, body_to_joint)
@@ -347,6 +351,37 @@ class motion_primitive_branch(nn.Module):
         msg = torch.matmul(att, v).permute(0, 3, 1, 2).contiguous()
         out = self.out_proj(msg)
         return out
+
+class hierarchical_level_interaction(nn.Module):
+    def __init__(self, dim, bias=False):
+        super(hierarchical_level_interaction, self).__init__()
+        self.j_gate = nn.Conv2d(dim * 3, 3, kernel_size=1, bias=bias)
+        self.p_gate = nn.Conv2d(dim * 3, 3, kernel_size=1, bias=bias)
+        self.b_gate = nn.Conv2d(dim * 3, 3, kernel_size=1, bias=bias)
+        self.j_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.p_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.b_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.softmax = nn.Softmax(dim=1)
+
+    def _mix(self, cur, msg1, msg2, gate, proj):
+        alpha = self.softmax(gate(torch.cat([cur, msg1, msg2], dim=1)))
+        mixed = alpha[:, 0:1, :, :] * cur + alpha[:, 1:2, :, :] * msg1 + alpha[:, 2:3, :, :] * msg2
+        return proj(mixed) + cur
+
+    def forward(self, joint, part, body, j2p, p2j, j2b, b2j):
+        j_from_p = torch.einsum('bcpt,jp->bcjt', part, p2j)
+        j_from_b = torch.einsum('bckt,jk->bcjt', body, b2j)
+
+        p_from_j = torch.einsum('bcjt,pj->bcpt', joint, j2p)
+        p_from_b = torch.einsum('bckt,jk,pj->bcpt', body, b2j, j2p)
+
+        b_from_j = torch.einsum('bcjt,kj->bckt', joint, j2b)
+        b_from_p = torch.einsum('bcpt,jp,kj->bckt', part, p2j, j2b)
+
+        joint_new = self._mix(joint, j_from_p, j_from_b, self.j_gate, self.j_proj)
+        part_new = self._mix(part, p_from_j, p_from_b, self.p_gate, self.p_proj)
+        body_new = self._mix(body, b_from_j, b_from_p, self.b_gate, self.b_proj)
+        return joint_new, part_new, body_new
 
 class cross_level_fusion(nn.Module):
     def __init__(self, dim, bias=False):
