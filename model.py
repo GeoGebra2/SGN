@@ -13,6 +13,7 @@ class SGN(nn.Module):
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
         self.num_primitives = max(1, int(getattr(args, "num_primitives", 4)))
+        self.primitive_scales = self._parse_primitive_scales(getattr(args, "num_primitive_scales", ""), self.num_primitives)
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -41,7 +42,7 @@ class SGN(nn.Module):
         self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.cross_fusion = cross_level_fusion(self.dim1, bias=bias)
-        self.primitive_layer = motion_primitives_layer(self.dim1, self.num_primitives, bias=bias)
+        self.primitive_layer = motion_primitives_layer(self.dim1, self.primitive_scales, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
 
         j2p_map, p2j_map, j2b_map, b2j_map = self._build_level_maps(num_joint)
@@ -101,6 +102,19 @@ class SGN(nn.Module):
                     j2b[b, j] = 1.0 / len(joints)
                     b2j[j, b] = 1.0
         return j2p, p2j, j2b, b2j
+
+    def _parse_primitive_scales(self, scales_cfg, fallback):
+        if isinstance(scales_cfg, (list, tuple)):
+            scales = [int(v) for v in scales_cfg if int(v) > 0]
+        elif isinstance(scales_cfg, str) and scales_cfg.strip():
+            parts = [p.strip() for p in scales_cfg.split(',') if p.strip()]
+            scales = [int(p) for p in parts if int(p) > 0]
+        else:
+            scales = []
+        if len(scales) == 0:
+            scales = [int(fallback)]
+        scales = sorted(list(set(scales)))
+        return scales
 
 
     def forward_features(self, input):
@@ -294,8 +308,24 @@ class temporal_attention(nn.Module):
         return x
 
 class motion_primitives_layer(nn.Module):
-    def __init__(self, dim, num_primitives=4, bias=False):
+    def __init__(self, dim, primitive_scales=4, bias=False):
         super(motion_primitives_layer, self).__init__()
+        if isinstance(primitive_scales, int):
+            primitive_scales = [primitive_scales]
+        self.primitive_scales = [max(1, int(s)) for s in primitive_scales]
+        self.branches = nn.ModuleList([motion_primitive_branch(dim, s, bias=bias) for s in self.primitive_scales])
+        self.fuse = nn.Conv2d(dim * len(self.primitive_scales), dim, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        outs = [branch(x) for branch in self.branches]
+        if len(outs) == 1:
+            return outs[0] + x
+        out = self.fuse(torch.cat(outs, dim=1)) + x
+        return out
+
+class motion_primitive_branch(nn.Module):
+    def __init__(self, dim, num_primitives=4, bias=False):
+        super(motion_primitive_branch, self).__init__()
         self.num_primitives = max(1, int(num_primitives))
         self.proto_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.frame_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
@@ -310,7 +340,7 @@ class motion_primitives_layer(nn.Module):
         att = torch.softmax(att, dim=-1)
         v = proto.permute(0, 2, 3, 1).contiguous()
         msg = torch.matmul(att, v).permute(0, 3, 1, 2).contiguous()
-        out = self.out_proj(msg) + x
+        out = self.out_proj(msg)
         return out
 
 class cross_level_fusion(nn.Module):
