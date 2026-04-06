@@ -39,6 +39,7 @@ class SGN(nn.Module):
         self.gcn_body1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.cross_fusion = cross_level_fusion(self.dim1, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
 
         j2p_map, p2j_map, j2b_map, b2j_map = self._build_level_maps(num_joint)
@@ -146,7 +147,7 @@ class SGN(nn.Module):
         input_body = self.gcn_body3(input_body, g_body)
         part_to_joint = torch.einsum('bcpt,jp->bcjt', input_part, self.p2j_map)
         body_to_joint = torch.einsum('bckt,jk->bcjt', input_body, self.b2j_map)
-        input = (input_joint + part_to_joint + body_to_joint) / 3.0
+        input = self.cross_fusion(input_joint, part_to_joint, body_to_joint)
         # Frame-level Module
         input = input + tem1
         input = self.cnn(input)
@@ -288,6 +289,18 @@ class temporal_attention(nn.Module):
         att = torch.softmax(att, dim=-1)
         x = x * att.unsqueeze(2)
         return x
+
+class cross_level_fusion(nn.Module):
+    def __init__(self, dim, bias=False):
+        super(cross_level_fusion, self).__init__()
+        self.score = nn.Conv2d(dim * 3, 3, kernel_size=1, bias=bias)
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, joint, part, body):
+        gate_in = torch.cat([joint, part, body], dim=1)
+        alpha = self.softmax(self.score(gate_in))
+        out = alpha[:, 0:1, :, :] * joint + alpha[:, 1:2, :, :] * part + alpha[:, 2:3, :, :] * body
+        return out
 
 class gcn_spa(nn.Module):
     def __init__(self, in_feature, out_feature, bias = False):
