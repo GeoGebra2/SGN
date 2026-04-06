@@ -42,6 +42,7 @@ class NTUDataLoaders(object):
         self.seg = seg
         self.args = args
         self.return_meta = return_meta
+        self.drop_two_person = bool(getattr(args, 'drop_two_person', False)) if args is not None else False
         self.create_datasets()
         if self.return_meta:
             self.train_set = NTUDataset(self.train_X, self.train_Y, pid=self.train_pid, aid=self.train_aid, return_meta=True)
@@ -136,6 +137,17 @@ class NTUDataLoaders(object):
             self.val_pid = self.test_pid
             self.val_aid = self.test_aid
 
+        if self.drop_two_person and self.dataset == 'NTU':
+            self.train_X, self.train_Y, self.train_pid, self.train_aid = self._drop_two_person_split(
+                self.train_X, self.train_Y, self.train_pid, self.train_aid
+            )
+            self.val_X, self.val_Y, self.val_pid, self.val_aid = self._drop_two_person_split(
+                self.val_X, self.val_Y, self.val_pid, self.val_aid
+            )
+            self.test_X, self.test_Y, self.test_pid, self.test_aid = self._drop_two_person_split(
+                self.test_X, self.test_Y, self.test_pid, self.test_aid
+            )
+
         all_y = np.unique(np.concatenate([self.train_Y, self.val_Y, self.test_Y], axis=0))
         self.class_ids = all_y.astype(int)
         self.label_map = {int(old): int(i) for i, old in enumerate(self.class_ids)}
@@ -148,6 +160,21 @@ class NTUDataLoaders(object):
         print('Dataset split:', self.dataset, self.metric, 'train', len(self.train_Y), 'val', len(self.val_Y), 'test', len(self.test_Y))
         print('Label coverage:', 'train', len(np.unique(self.train_Y)), 'val', len(np.unique(self.val_Y)), 'test', len(np.unique(self.test_Y)))
         print('Num classes:', self.num_classes)
+
+    def _drop_two_person_split(self, x, y, pid=None, aid=None):
+        if len(y) == 0:
+            return x, y, pid, aid
+        y = np.array(y, dtype='int')
+        if aid is not None and len(aid) == len(y):
+            aid_arr = np.array(aid, dtype='int')
+            keep = aid_arr < 50
+        else:
+            keep = y < 49
+        x_new = x[keep]
+        y_new = y[keep]
+        pid_new = None if pid is None else np.array(pid)[keep]
+        aid_new = None if aid is None else np.array(aid)[keep]
+        return x_new, y_new, pid_new, aid_new
 
     def collate_fn_fix_train(self, batch):
         """Puts each data field into a tensor with outer dimension batch size

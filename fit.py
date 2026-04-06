@@ -38,6 +38,8 @@ def add_fit_args(parser):
                       help='number of segmentation')
     args.add_argument('--motion-only', action='store_true',
                       help='use motion-only input (velocity/acceleration)')
+    args.add_argument('--drop-two-person', action='store_true',
+                      help='drop two-person interaction actions in NTU (A050-A060)')
     args.add_argument('--metric-loss', type=str, default='none', choices=['none', 'supcon', 'triplet'])
     args.add_argument('--metric-weight', type=float, default=1.0)
     args.add_argument('--triplet-margin', type=float, default=0.2)
