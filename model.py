@@ -14,6 +14,7 @@ class SGN(nn.Module):
         self.motion_only = getattr(args, "motion_only", False)
         self.num_primitives = max(1, int(getattr(args, "num_primitives", 4)))
         self.primitive_scales = self._parse_primitive_scales(getattr(args, "num_primitive_scales", ""), self.num_primitives)
+        self.num_joint_primitives = max(1, int(getattr(args, "num_joint_primitives", 8)))
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -41,6 +42,7 @@ class SGN(nn.Module):
         self.gcn_body1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn_body2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn_body3 = gcn_spa(self.dim1, self.dim1, bias=bias)
+        self.joint_primitive = joint_motion_primitive_decomposer(self.dim1 // 4, self.num_joint_primitives, bias=bias)
         self.level_interaction = hierarchical_level_interaction(self.dim1, bias=bias)
         self.cross_fusion = cross_level_fusion(self.dim1, bias=bias)
         self.primitive_layer = motion_primitives_layer(self.dim1, self.primitive_scales, bias=bias)
@@ -141,6 +143,7 @@ class SGN(nn.Module):
         else:
             pos = self.joint_embed(input)
             dy = pos + dif
+        dy = self.joint_primitive(dy)
         dy_part = torch.einsum('bcjt,pj->bcpt', dy, self.j2p_map)
         dy_body = torch.einsum('bcjt,kj->bckt', dy, self.j2b_map)
         spa_part = self.one_hot(bs, self.num_part, step).permute(0, 3, 2, 1).to(input.device)
@@ -351,6 +354,27 @@ class motion_primitive_branch(nn.Module):
         msg = torch.matmul(att, v).permute(0, 3, 1, 2).contiguous()
         out = self.out_proj(msg)
         return out
+
+class joint_motion_primitive_decomposer(nn.Module):
+    def __init__(self, dim, num_primitives=8, bias=False):
+        super(joint_motion_primitive_decomposer, self).__init__()
+        self.num_primitives = max(1, int(num_primitives))
+        self.frame_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.seed_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.value_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.out_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        self.codebook = nn.Parameter(torch.randn(1, dim, 1, self.num_primitives))
+
+    def forward(self, x):
+        seeds = torch.nn.functional.adaptive_avg_pool2d(x, (x.size(2), self.num_primitives))
+        seeds = seeds + self.codebook
+        q = self.frame_proj(x).permute(0, 2, 3, 1).contiguous()
+        k = self.seed_proj(seeds).permute(0, 2, 1, 3).contiguous()
+        att = torch.matmul(q, k) / math.sqrt(max(1, q.size(-1)))
+        att = torch.softmax(att, dim=-1)
+        v = self.value_proj(seeds).permute(0, 2, 3, 1).contiguous()
+        recon = torch.matmul(att, v).permute(0, 3, 1, 2).contiguous()
+        return self.out_proj(recon) + x
 
 class hierarchical_level_interaction(nn.Module):
     def __init__(self, dim, bias=False):

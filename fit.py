@@ -40,6 +40,8 @@ def add_fit_args(parser):
                       help='use motion-only input (velocity/acceleration)')
     args.add_argument('--num-primitives', type=int, default=4,
                       help='number of motion primitives for temporal segment abstraction')
+    args.add_argument('--num-joint-primitives', type=int, default=8,
+                      help='number of per-joint motion primitives for decomposition')
     args.add_argument('--num-primitive-scales', type=str, default='',
                       help='comma-separated scales, e.g. 3,6,9')
     args.add_argument('--drop-two-person', action='store_true',
