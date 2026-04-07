@@ -7,15 +7,7 @@ import numpy as np
 import h5py
 import random
 import os.path as osp
-import sys
 import math
-import scipy.misc
-if sys.version_info[0] == 2:
-    import cPickle as pickle
-else:
-    import pickle
-from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
 
 
 class NTUDataset(Dataset):
@@ -63,7 +55,7 @@ class NTUDataLoaders(object):
                               collate_fn=self.collate_fn_fix_train, pin_memory=True, drop_last=True)
 
     def get_val_loader(self, batch_size, num_workers):
-        if self.dataset == 'NTU' or self.dataset == 'NTU_ID' or self.dataset == 'kinetics' or self.dataset == 'NTU120':
+        if self.dataset == 'NTU' or self.dataset == 'NTU_ID' or self.dataset == 'NTU_PRIM' or self.dataset == 'kinetics' or self.dataset == 'NTU120':
             return DataLoader(self.val_set, batch_size=batch_size,
                               shuffle=False, num_workers=num_workers,
                               collate_fn=self.collate_fn_fix_val, pin_memory=True, drop_last=False)
@@ -108,6 +100,16 @@ class NTUDataLoaders(object):
             elif self.case == 3:
                 self.metric = 'CA'
             path = osp.join('./data/ntu', 'NTU_ID_' + self.metric + '.h5')
+        elif self.dataset == 'NTU_PRIM':
+            if self.case == 0:
+                self.metric = 'CS'
+            elif self.case == 1:
+                self.metric = 'CV'
+            elif self.case == 2:
+                self.metric = 'CR'
+            elif self.case == 3:
+                self.metric = 'CA'
+            path = osp.join('./data/ntu', 'NTU_PRIM_' + self.metric + '.h5')
 
         f = h5py.File(path , 'r')
         self.train_X = f['x'][:]
@@ -182,6 +184,15 @@ class NTUDataLoaders(object):
             elif self.case == 3:
                 theta = 0.5
         elif self.dataset == 'NTU_ID':
+            if self.case == 0:
+                theta = 0.3
+            elif self.case == 1:
+                theta = 0.5
+            elif self.case == 2:
+                theta = 0.5
+            elif self.case == 3:
+                theta = 0.5
+        elif self.dataset == 'NTU_PRIM':
             if self.case == 0:
                 theta = 0.3
             elif self.case == 1:

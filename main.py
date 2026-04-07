@@ -4,7 +4,6 @@ import argparse
 import time
 import shutil
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
 import os.path as osp
 import csv
 import numpy as np
@@ -39,6 +38,7 @@ parser.set_defaults(
     seg = 20,
     )
 args = parser.parse_args()
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main():
     ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
@@ -52,9 +52,8 @@ def main():
 
     if torch.cuda.is_available():
         print('It is using GPU!')
-        model = model.cuda()
-
-    criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
+    model = model.to(device)
+    criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.monitor == 'val_acc':
@@ -148,7 +147,7 @@ def main():
     ### Test
     args.train = 0
     model = SGN(args.num_classes, args.dataset, args.seg, args)
-    model = model.cuda()
+    model = model.to(device)
     test(test_loader, model, checkpoint, lable_path, pred_path)
 
 
@@ -163,10 +162,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
     for i, (inputs, target) in enumerate(train_loader):
 
-        inputs = inputs.cuda()
+        inputs = inputs.to(device)
         feats = model.forward_features(inputs)
         output = model.fc(feats)
-        target = target.cuda(non_blocking=True)
+        target = target.to(device, non_blocking=True)
         loss = criterion(output, target)
         if args.metric_loss != 'none':
             metric = metric_loss(feats, target, args)
@@ -210,8 +209,8 @@ def validate(val_loader, model, criterion):
 
     for i, (inputs, target) in enumerate(val_loader):
         with torch.no_grad():
-            output = model(inputs.cuda())
-        target = target.cuda(non_blocking=True)
+            output = model(inputs.to(device))
+        target = target.to(device, non_blocking=True)
         with torch.no_grad():
             loss = criterion(output, target)
 
@@ -234,7 +233,7 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     acc4 = AverageMeter()
     acc5 = AverageMeter()
     # load learnt model that obtained best performance on validation set
-    model.load_state_dict(torch.load(checkpoint)['state_dict'])
+    model.load_state_dict(torch.load(checkpoint, map_location=device)['state_dict'])
     model.eval()
 
     label_output = list()
@@ -243,14 +242,14 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     t_start = time.time()
     for i, (inputs, target) in enumerate(test_loader):
         with torch.no_grad():
-            output = model(inputs.cuda())
+            output = model(inputs.to(device))
             output = output.view((-1, inputs.size(0)//target.size(0), output.size(1)))
             output = output.mean(1)
 
         label_output.append(target.cpu().numpy())
         pred_output.append(output.cpu().numpy())
 
-        acc = accuracy(output.data, target.cuda(non_blocking=True), topk=(1, 2, 3, 4, 5))
+        acc = accuracy(output.data, target.to(device, non_blocking=True), topk=(1, 2, 3, 4, 5))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
         acc3.update(acc[2], inputs.size(0))

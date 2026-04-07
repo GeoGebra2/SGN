@@ -12,7 +12,9 @@ def add_fit_args(parser):
                       help='select dataset to evlulate')
     args.add_argument('--start-epoch', default=0, type=int,
                       help='manual epoch number (useful on restarts)')
-    args.add_argument('--max-epoches', type=int, default=150,
+    args.add_argument('--max-epoches', dest='max_epochs', type=int, default=150,
+                      help='max number of epochs to run')
+    args.add_argument('--max-epochs', dest='max_epochs', type=int,
                       help='max number of epochs to run')
     args.add_argument('--lr', type=float, default=0.1,
                       help='initial learning rate')
