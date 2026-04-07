@@ -266,6 +266,9 @@ class NTUDataLoaders(object):
         seqs = []
 
         for idx, seq in enumerate(joints):
+            seq = np.asarray(seq)
+            if seq.ndim != 2:
+                seq = np.zeros((self.seg, 150), dtype=np.float32)
             zero_row = []
             for i in range(len(seq)):
                 if (seq[i, :] == np.zeros((1, 150))).all():
@@ -281,8 +284,14 @@ class NTUDataLoaders(object):
     def sub_seq(self, seqs, seq , train = 1):
         group = self.seg
 
+        if seq.ndim != 2:
+            seq = np.zeros((0, 75), dtype=np.float32)
+
         if self.dataset == 'SYSU' or self.dataset == 'SYSU_same':
             seq = seq[::2, :]
+
+        if seq.shape[0] == 0:
+            seq = np.zeros((self.seg, 75), dtype=np.float32)
 
         if seq.shape[0] < self.seg:
             pad = np.zeros((self.seg - seq.shape[0], seq.shape[1])).astype(np.float32)
@@ -329,6 +338,9 @@ class AverageMeter(object):
 
 
 def turn_two_to_one(seq):
+    seq = np.asarray(seq)
+    if seq.ndim != 2 or seq.shape[0] == 0:
+        return np.zeros((0, 75), dtype=np.float32)
     new_seq = list()
     for idx, ske in enumerate(seq):
         if (ske[0:75] == np.zeros((1, 75))).all():
@@ -338,7 +350,9 @@ def turn_two_to_one(seq):
         else:
             new_seq.append(ske[0:75])
             new_seq.append(ske[75:])
-    return np.array(new_seq)
+    if len(new_seq) == 0:
+        return np.zeros((0, 75), dtype=np.float32)
+    return np.array(new_seq, dtype=np.float32)
 
 def _rot(rot):
     cos_r, sin_r = rot.cos(), rot.sin()
