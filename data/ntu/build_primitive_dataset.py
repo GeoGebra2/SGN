@@ -190,7 +190,15 @@ def _kmeans_predict(x, centers):
     return np.argmin(d, axis=1).astype(np.int64)
 
 
-def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segments, seed):
+def _remap_contiguous(train_labels, val_labels, test_labels):
+    all_labels = np.concatenate([train_labels, val_labels, test_labels], axis=0).astype(np.int64)
+    uniq = np.unique(all_labels)
+    label_map = {int(v): int(i) for i, v in enumerate(uniq.tolist())}
+    remap = np.vectorize(lambda z: label_map[int(z)], otypes=[np.int64])
+    return remap(train_labels), remap(val_labels), remap(test_labels), uniq
+
+
+def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segments, seed, label_mode):
     with h5py.File(source_h5, 'r') as f:
         x_train = f['x'][:]
         y_train = f['y'][:]
@@ -203,12 +211,20 @@ def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segmen
     te_samples, te_feats, te_meta = _extract_split(x_test, y_test, 'test', out_len, min_len, max_segments)
     if len(tr_samples) == 0:
         raise RuntimeError('No primitive samples extracted from training split.')
-    tr_feats_np = np.stack(tr_feats, axis=0)
-    n_clusters = max(2, min(clusters, tr_feats_np.shape[0]))
-    centers = _kmeans_fit(tr_feats_np, n_clusters=n_clusters, seed=seed)
-    tr_labels = _kmeans_predict(tr_feats_np, centers)
-    va_labels = _kmeans_predict(np.stack(va_feats, axis=0), centers) if len(va_feats) > 0 else np.zeros((0,), dtype=np.int64)
-    te_labels = _kmeans_predict(np.stack(te_feats, axis=0), centers) if len(te_feats) > 0 else np.zeros((0,), dtype=np.int64)
+    if label_mode == 'cluster':
+        tr_feats_np = np.stack(tr_feats, axis=0)
+        n_clusters = max(2, min(clusters, tr_feats_np.shape[0]))
+        centers = _kmeans_fit(tr_feats_np, n_clusters=n_clusters, seed=seed)
+        tr_labels = _kmeans_predict(tr_feats_np, centers)
+        va_labels = _kmeans_predict(np.stack(va_feats, axis=0), centers) if len(va_feats) > 0 else np.zeros((0,), dtype=np.int64)
+        te_labels = _kmeans_predict(np.stack(te_feats, axis=0), centers) if len(te_feats) > 0 else np.zeros((0,), dtype=np.int64)
+        class_ids = np.arange(n_clusters, dtype=np.int64)
+    else:
+        tr_labels = np.array([m[2] for m in tr_meta], dtype=np.int64)
+        va_labels = np.array([m[2] for m in va_meta], dtype=np.int64)
+        te_labels = np.array([m[2] for m in te_meta], dtype=np.int64)
+        tr_labels, va_labels, te_labels, class_ids = _remap_contiguous(tr_labels, va_labels, te_labels)
+        n_clusters = int(len(class_ids))
     tr_x = np.stack(tr_samples, axis=0).astype(np.float32)
     va_x = np.stack(va_samples, axis=0).astype(np.float32) if len(va_samples) > 0 else np.zeros((0, out_len, 150), dtype=np.float32)
     te_x = np.stack(te_samples, axis=0).astype(np.float32) if len(te_samples) > 0 else np.zeros((0, out_len, 150), dtype=np.float32)
@@ -220,11 +236,19 @@ def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segmen
         f.create_dataset('valid_y', data=_one_hot(va_labels, n_clusters))
         f.create_dataset('test_x', data=te_x)
         f.create_dataset('test_y', data=_one_hot(te_labels, n_clusters))
+        f.create_dataset('pid', data=np.array([m[1] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_pid', data=np.array([m[1] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_pid', data=np.array([m[1] for m in te_meta], dtype=np.int64))
+        f.create_dataset('aid', data=np.array([m[2] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_aid', data=np.array([m[2] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_aid', data=np.array([m[2] for m in te_meta], dtype=np.int64))
         f.create_dataset('src_action', data=np.array([m[2] for m in tr_meta], dtype=np.int64))
         f.create_dataset('valid_src_action', data=np.array([m[2] for m in va_meta], dtype=np.int64))
         f.create_dataset('test_src_action', data=np.array([m[2] for m in te_meta], dtype=np.int64))
+        f.create_dataset('class_ids', data=class_ids.astype(np.int64))
     print('Saved primitive dataset to', out_h5)
     print('Primitive classes:', n_clusters)
+    print('Label mode:', label_mode)
     print('Split size train/val/test:', tr_x.shape[0], va_x.shape[0], te_x.shape[0])
 
 
@@ -237,6 +261,7 @@ def main():
     parser.add_argument('--min_len', type=int, default=5)
     parser.add_argument('--max_segments', type=int, default=6)
     parser.add_argument('--seed', type=int, default=1337)
+    parser.add_argument('--label_mode', type=str, default='cluster', choices=['cluster', 'id'])
     args = parser.parse_args()
     np.random.seed(args.seed)
     build_primitive_h5(
@@ -247,6 +272,7 @@ def main():
         min_len=args.min_len,
         max_segments=args.max_segments,
         seed=args.seed,
+        label_mode=args.label_mode,
     )
 
 
