@@ -190,6 +190,62 @@ def _kmeans_predict(x, centers):
     return np.argmin(d, axis=1).astype(np.int64)
 
 
+def _kmeans_fit_predict(x, n_clusters, seed, max_iter=100):
+    centers = _kmeans_fit(x, n_clusters=n_clusters, seed=seed, max_iter=max_iter)
+    labels = _kmeans_predict(x, centers)
+    return centers, labels
+
+
+def _calinski_harabasz_score(x, labels, centers):
+    n = x.shape[0]
+    k = centers.shape[0]
+    if k <= 1 or n <= k:
+        return -1e12
+    global_center = x.mean(axis=0)
+    w_trace = 0.0
+    b_trace = 0.0
+    for ci in range(k):
+        idx = labels == ci
+        if not np.any(idx):
+            continue
+        xi = x[idx]
+        ni = float(xi.shape[0])
+        diff = xi - centers[ci]
+        w_trace += float((diff * diff).sum())
+        c_diff = centers[ci] - global_center
+        b_trace += ni * float((c_diff * c_diff).sum())
+    if w_trace <= 1e-12 or b_trace <= 1e-12:
+        return -1e12
+    return (b_trace / (k - 1.0)) / (w_trace / (n - k))
+
+
+def _select_cluster_count_auto(x, min_k, max_k, seed, sample_size):
+    n = x.shape[0]
+    if n < 4:
+        return 2
+    k_min = max(2, int(min_k))
+    k_max = max(k_min, int(max_k))
+    k_max = min(k_max, max(2, n - 1))
+    if k_min > k_max:
+        return max(2, min(8, n - 1))
+    rng = np.random.default_rng(seed)
+    if n > sample_size:
+        ids = rng.choice(n, size=sample_size, replace=False)
+        x_eval = x[ids]
+    else:
+        x_eval = x
+    best_k = k_min
+    best_score = -1e18
+    for k in range(k_min, k_max + 1):
+        centers, labels = _kmeans_fit_predict(x_eval, n_clusters=k, seed=seed + k, max_iter=60)
+        score = _calinski_harabasz_score(x_eval, labels, centers)
+        print('AutoK candidate k={} score={:.6f}'.format(k, score))
+        if score > best_score:
+            best_score = score
+            best_k = k
+    return int(best_k)
+
+
 def _remap_contiguous(train_labels, val_labels, test_labels):
     all_labels = np.concatenate([train_labels, val_labels, test_labels], axis=0).astype(np.int64)
     uniq = np.unique(all_labels)
@@ -198,7 +254,7 @@ def _remap_contiguous(train_labels, val_labels, test_labels):
     return remap(train_labels), remap(val_labels), remap(test_labels), uniq
 
 
-def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segments, seed, label_mode):
+def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segments, seed, label_mode, min_clusters, max_clusters, auto_sample_size):
     with h5py.File(source_h5, 'r') as f:
         x_train = f['x'][:]
         y_train = f['y'][:]
@@ -213,9 +269,19 @@ def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segmen
         raise RuntimeError('No primitive samples extracted from training split.')
     if label_mode == 'cluster':
         tr_feats_np = np.stack(tr_feats, axis=0)
-        n_clusters = max(2, min(clusters, tr_feats_np.shape[0]))
-        centers = _kmeans_fit(tr_feats_np, n_clusters=n_clusters, seed=seed)
-        tr_labels = _kmeans_predict(tr_feats_np, centers)
+        if isinstance(clusters, str) and clusters.lower() == 'auto':
+            n_clusters = _select_cluster_count_auto(
+                tr_feats_np,
+                min_k=min_clusters,
+                max_k=max_clusters,
+                seed=seed,
+                sample_size=auto_sample_size,
+            )
+            print('Auto-selected primitive cluster count:', n_clusters)
+        else:
+            n_clusters = int(clusters)
+        n_clusters = max(2, min(n_clusters, tr_feats_np.shape[0]))
+        centers, tr_labels = _kmeans_fit_predict(tr_feats_np, n_clusters=n_clusters, seed=seed, max_iter=100)
         va_labels = _kmeans_predict(np.stack(va_feats, axis=0), centers) if len(va_feats) > 0 else np.zeros((0,), dtype=np.int64)
         te_labels = _kmeans_predict(np.stack(te_feats, axis=0), centers) if len(te_feats) > 0 else np.zeros((0,), dtype=np.int64)
         class_ids = np.arange(n_clusters, dtype=np.int64)
@@ -256,7 +322,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source_h5', type=str, required=True)
     parser.add_argument('--out_h5', type=str, required=True)
-    parser.add_argument('--clusters', type=int, default=32)
+    parser.add_argument('--clusters', type=str, default='32')
+    parser.add_argument('--min_clusters', type=int, default=8)
+    parser.add_argument('--max_clusters', type=int, default=48)
+    parser.add_argument('--auto_sample_size', type=int, default=20000)
     parser.add_argument('--out_len', type=int, default=20)
     parser.add_argument('--min_len', type=int, default=5)
     parser.add_argument('--max_segments', type=int, default=6)
@@ -273,6 +342,9 @@ def main():
         max_segments=args.max_segments,
         seed=args.seed,
         label_mode=args.label_mode,
+        min_clusters=args.min_clusters,
+        max_clusters=args.max_clusters,
+        auto_sample_size=args.auto_sample_size,
     )
 
 
