@@ -7,6 +7,7 @@ import os
 import os.path as osp
 import csv
 import numpy as np
+import h5py
 
 np.random.seed(1337)
 
@@ -40,7 +41,227 @@ parser.set_defaults(
 args = parser.parse_args()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+GROUPS = [
+    [3, 20],
+    [0, 1, 2, 4, 8, 12, 16],
+    [8, 9, 10, 11, 23, 24],
+    [4, 5, 6, 7, 21, 22],
+    [16, 17, 18, 19],
+    [12, 13, 14, 15],
+]
+
+def _case_metric(case_id):
+    if case_id == 0:
+        return 'CS'
+    if case_id == 1:
+        return 'CV'
+    if case_id == 2:
+        return 'CR'
+    return 'CA'
+
+def _guess_id_h5(case_id):
+    metric = _case_metric(case_id)
+    return osp.join('./data/ntu', 'NTU_ID_' + metric + '.h5')
+
+def _guess_prim_h5(case_id):
+    metric = _case_metric(case_id)
+    return osp.join('./data/ntu', 'NTU_PRIM_' + metric + '.h5')
+
+def _guess_prim_ckpt(case_id):
+    return osp.join('./results/NTU_PRIM/SGN', '%s_best.pth' % case_id)
+
+def _to_label(y):
+    if y.ndim == 2:
+        return np.argmax(y, axis=-1).astype(np.int64)
+    return y.astype(np.int64)
+
+def _smooth(seq):
+    if seq.shape[0] < 3:
+        return seq
+    kernel = np.array([1.0, 2.0, 1.0], dtype=np.float32) / 4.0
+    out = np.copy(seq)
+    for j in range(seq.shape[1]):
+        for c in range(seq.shape[2]):
+            s = seq[:, j, c]
+            p = np.pad(s, (1, 1), mode='edge')
+            out[:, j, c] = np.convolve(p, kernel, mode='valid')
+    return out
+
+def _contiguous_ranges(mask):
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return []
+    ranges = []
+    start = idx[0]
+    prev = idx[0]
+    for i in idx[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            ranges.append((start, prev))
+            start = i
+            prev = i
+    ranges.append((start, prev))
+    return ranges
+
+def _resample(seq, out_len):
+    t = seq.shape[0]
+    if t == out_len:
+        return seq
+    if t <= 1:
+        return np.repeat(seq[:1], out_len, axis=0)
+    x_old = np.arange(t, dtype=np.float32)
+    x_new = np.linspace(0, t - 1, out_len, dtype=np.float32)
+    out = np.zeros((out_len, seq.shape[1], seq.shape[2]), dtype=np.float32)
+    for j in range(seq.shape[1]):
+        for c in range(seq.shape[2]):
+            out[:, j, c] = np.interp(x_new, x_old, seq[:, j, c])
+    return out
+
+def _segment_primitives_with_meta(seq150, out_len, min_len, max_segments):
+    seq = seq150[:, :75].reshape(seq150.shape[0], 25, 3).astype(np.float32)
+    valid = np.abs(seq).sum(axis=(1, 2)) > 1e-6
+    seq = seq[valid]
+    if seq.shape[0] == 0:
+        seq = np.zeros((out_len, 25, 3), dtype=np.float32)
+    seq = _smooth(seq)
+    t = seq.shape[0]
+    if t < 2:
+        seq = np.concatenate([seq, np.repeat(seq[-1:], 1, axis=0)], axis=0)
+        t = seq.shape[0]
+    v = np.linalg.norm(np.diff(seq, axis=0, prepend=seq[:1]), axis=2)
+    a = np.abs(np.diff(v, axis=0, prepend=v[:1]))
+    candidates = []
+    global_flux = a.sum(axis=1)
+    for gid, joints in enumerate(GROUPS):
+        flux = a[:, joints].sum(axis=1)
+        thr = max(np.quantile(flux, 0.6), 1e-6)
+        ranges = _contiguous_ranges(flux >= thr)
+        for s, e in ranges:
+            if e - s + 1 < min_len:
+                continue
+            score = float(flux[s:e + 1].mean() * (e - s + 1))
+            candidates.append((score, gid, s, e))
+    if len(candidates) == 0:
+        win = min(max(min_len, out_len // 2), t)
+        if win <= 0:
+            win = 1
+        csum = np.convolve(global_flux, np.ones(win, dtype=np.float32), mode='valid')
+        s = int(np.argmax(csum))
+        e = min(t - 1, s + win - 1)
+        candidates.append((float(csum[s]), 1, s, e))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    selected = candidates[:max_segments]
+    prims = []
+    metas = []
+    for score, gid, s, e in selected:
+        clip = seq[s:e + 1]
+        clip = _resample(clip, out_len)
+        flat = clip.reshape(out_len, 75).astype(np.float32)
+        prims.append(flat)
+        metas.append({
+            'gid': gid,
+            'score': float(score / max(1.0, float(t))),
+            'length': float((e - s + 1) / max(1.0, float(t))),
+        })
+    return prims, metas
+
+def _build_cluster_pid_map(prim_label_h5, num_clusters, num_pid):
+    with h5py.File(prim_label_h5, 'r') as f:
+        prim_y = _to_label(f['y'][:])
+        src_pid = f['src_action'][:].astype(np.int64)
+    src_pid = np.clip(src_pid, 0, num_pid - 1)
+    counts = np.ones((num_clusters, num_pid), dtype=np.float64) * 1e-6
+    for c, p in zip(prim_y, src_pid):
+        if 0 <= c < num_clusters:
+            counts[c, p] += 1.0
+    counts = counts / counts.sum(axis=1, keepdims=True)
+    return counts.astype(np.float32)
+
+def _weight_value(meta, conf, mode):
+    if mode == 'uniform':
+        return 1.0
+    if mode == 'length':
+        return max(meta['length'], 1e-6)
+    if mode == 'conf':
+        return max(conf, 1e-6)
+    return max(meta['length'], 1e-6) * max(meta['score'], 1e-6) * max(conf, 1e-6)
+
+def run_primitive_fusion_id_test():
+    source_h5 = args.prim_source_h5 if len(args.prim_source_h5) > 0 else _guess_id_h5(args.case)
+    prim_label_h5 = args.prim_label_h5 if len(args.prim_label_h5) > 0 else _guess_prim_h5(args.case)
+    checkpoint = args.prim_checkpoint if len(args.prim_checkpoint) > 0 else _guess_prim_ckpt(args.case)
+    with h5py.File(source_h5, 'r') as f:
+        x_test = f['test_x'][:]
+        y_test = f['test_y'][:]
+    if y_test.ndim == 2:
+        y_test_label = np.argmax(y_test, axis=-1).astype(np.int64)
+        num_pid = y_test.shape[1]
+    else:
+        y_test_label = y_test.astype(np.int64)
+        num_pid = int(y_test_label.max()) + 1
+    ckpt = torch.load(checkpoint, map_location=device)
+    state_dict = ckpt['state_dict']
+    num_model_classes = int(state_dict['fc.weight'].shape[0])
+    prim_model = SGN(num_model_classes, 'NTU_PRIM', args.seg, args).to(device)
+    prim_model.load_state_dict(state_dict)
+    prim_model.eval()
+    cluster_pid_map = None
+    if num_model_classes != num_pid:
+        cluster_pid_map = _build_cluster_pid_map(prim_label_h5, num_model_classes, num_pid)
+    top1 = 0
+    top5 = 0
+    t_start = time.time()
+    for i in range(x_test.shape[0]):
+        prims, metas = _segment_primitives_with_meta(
+            x_test[i],
+            out_len=args.seg,
+            min_len=args.prim_min_len,
+            max_segments=args.prim_max_segments,
+        )
+        if len(prims) == 0:
+            prims = [np.zeros((args.seg, 75), dtype=np.float32)]
+            metas = [{'gid': 1, 'score': 1.0, 'length': 1.0}]
+        batch = np.zeros((len(prims), args.seg, 75), dtype=np.float32)
+        for j, p in enumerate(prims):
+            batch[j] = p
+        with torch.no_grad():
+            logits = prim_model(torch.from_numpy(batch).to(device))
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+        confs = probs.max(axis=1)
+        if cluster_pid_map is not None:
+            probs_pid = probs @ cluster_pid_map
+        else:
+            probs_pid = probs
+        weights = np.array([
+            _weight_value(metas[k], float(confs[k]), args.prim_weight_mode)
+            for k in range(len(metas))
+        ], dtype=np.float32)
+        wsum = float(weights.sum())
+        if wsum <= 0:
+            weights = np.ones_like(weights)
+            wsum = float(weights.sum())
+        fused = (weights[:, None] * probs_pid).sum(axis=0) / wsum
+        pred = int(np.argmax(fused))
+        gt = int(y_test_label[i])
+        if pred == gt:
+            top1 += 1
+        topk = min(5, fused.shape[0])
+        top_ids = np.argsort(-fused)[:topk]
+        if gt in top_ids:
+            top5 += 1
+        if (i + 1) % 200 == 0 or (i + 1) == x_test.shape[0]:
+            print('Fusion test progress {}/{}'.format(i + 1, x_test.shape[0]))
+    top1_acc = 100.0 * top1 / max(1, x_test.shape[0])
+    top5_acc = 100.0 * top5 / max(1, x_test.shape[0])
+    print('Fusion ID Test: Top-1 accu {:.3f}, Top-5 accu {:.3f}, time: {:.2f}s'.format(
+        top1_acc, top5_acc, time.time() - t_start
+    ))
+
 def main():
+    if args.fuse_prim_id:
+        run_primitive_fusion_id_test()
+        return
     ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
     args.num_classes = getattr(ntu_loaders, 'num_classes', None) or get_num_classes(args.dataset)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
