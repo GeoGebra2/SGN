@@ -12,6 +12,7 @@ class SGN(nn.Module):
         self.dataset = dataset
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
+        self.num_pid_classes = getattr(args, "num_pid_classes", 0)
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -27,7 +28,8 @@ class SGN(nn.Module):
         self.gcn1 = gcn_spa(self.dim1 // 2, self.dim1 // 2, bias=bias)
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
-        self.fc = nn.Linear(self.dim1 * 2, num_classes)
+        self.fc_action = nn.Linear(self.dim1 * 2, num_classes)
+        self.fc_pid = nn.Linear(self.dim1 * 2, self.num_pid_classes) if self.num_pid_classes > 0 else None
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -80,8 +82,20 @@ class SGN(nn.Module):
 
     def forward(self, input):
         output = self.forward_features(input)
-        output = self.fc(output)
-        return output
+        return self.fc_action(output)
+
+    @property
+    def fc(self):
+        return self.fc_action
+
+    def forward_heads(self, input):
+        feats = self.forward_features(input)
+        return self.forward_heads_from_features(feats)
+
+    def forward_heads_from_features(self, feats):
+        action_logits = self.fc_action(feats)
+        pid_logits = self.fc_pid(feats) if self.fc_pid is not None else None
+        return action_logits, pid_logits
 
     def one_hot(self, bs, spa, tem):
 

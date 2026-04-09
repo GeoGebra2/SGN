@@ -36,13 +36,26 @@ parser.set_defaults(
     print_freq = 20,
     train = 0,
     seg = 20,
+    joint_pid = True,
     )
 args = parser.parse_args()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def main():
-    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
+    ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args, return_meta=args.joint_pid)
     args.num_classes = getattr(ntu_loaders, 'num_classes', None) or get_num_classes(args.dataset)
+    args.num_pid_classes = 0
+    if args.joint_pid and getattr(ntu_loaders, 'train_pid', None) is not None:
+        pid_train = np.asarray(ntu_loaders.train_pid, dtype=int)
+        pid_val = np.asarray(ntu_loaders.val_pid, dtype=int) if getattr(ntu_loaders, 'val_pid', None) is not None else np.empty((0,), dtype=int)
+        pid_test = np.asarray(ntu_loaders.test_pid, dtype=int) if getattr(ntu_loaders, 'test_pid', None) is not None else np.empty((0,), dtype=int)
+        pid_all = np.concatenate([pid_train, pid_val, pid_test], axis=0)
+        if pid_all.size > 0:
+            args.num_pid_classes = int(pid_all.max()) + 1
+    args.joint_lambda = float(np.clip(args.joint_lambda, 0.0, 1.0))
+    if args.num_pid_classes <= 0:
+        args.joint_pid = False
+    print('Joint action/pid:', args.joint_pid, 'num_pid_classes:', args.num_pid_classes, 'lambda:', args.joint_lambda)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
 
     total = get_n_params(model)
@@ -54,6 +67,7 @@ def main():
         print('It is using GPU!')
     model = model.to(device)
     criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).to(device)
+    pid_criterion = nn.CrossEntropyLoss().to(device) if args.num_pid_classes > 0 else None
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.monitor == 'val_acc':
@@ -93,6 +107,8 @@ def main():
 
     lable_path = osp.join(save_path, '%s_lable.txt'% args.case)
     pred_path = osp.join(save_path, '%s_pred.txt' % args.case)
+    pid_lable_path = osp.join(save_path, '%s_pid_lable.txt' % args.case)
+    pid_pred_path = osp.join(save_path, '%s_pid_pred.txt' % args.case)
 
     # Training
     if args.train ==1:
@@ -101,16 +117,16 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch)
-            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, model, criterion)
-            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
-                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5)]]
+            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5, train_pid_acc = train(train_loader, model, criterion, pid_criterion, optimizer, epoch)
+            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5, val_pid_acc = validate(val_loader, model, criterion, pid_criterion)
+            log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5), float(train_pid_acc), \
+                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5), float(val_pid_acc)]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
-                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\t'
-                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}'
+                  'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\tPID accu {:.4f}\t'
+                  'Valid: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\tPID accu {:.4f}'
                   .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5,
-                          val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5))
+                          train_pid_acc, val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5, val_pid_acc))
 
             current = val_loss if mode == 'min' else val_acc1
 
@@ -140,7 +156,7 @@ def main():
         print('Best %s: %.4f from epoch-%d' % (args.monitor, best, best_epoch))
         with open(csv_file, 'w') as fw:
             cw = csv.writer(fw)
-            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'acc@4', 'acc@5', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3', 'val_acc@4', 'val_acc@5'])
+            cw.writerow(['loss', 'acc@1', 'acc@2', 'acc@3', 'acc@4', 'acc@5', 'pid_acc', 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3', 'val_acc@4', 'val_acc@5', 'val_pid_acc'])
             cw.writerows(log_res)
         print('Save train and validation log into into %s' % csv_file)
 
@@ -148,31 +164,44 @@ def main():
     args.train = 0
     model = SGN(args.num_classes, args.dataset, args.seg, args)
     model = model.to(device)
-    test(test_loader, model, checkpoint, lable_path, pred_path)
+    test(test_loader, model, checkpoint, lable_path, pred_path, pid_lable_path, pid_pred_path)
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, pid_criterion, optimizer, epoch):
     losses = AverageMeter()
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
     acc4 = AverageMeter()
     acc5 = AverageMeter()
+    pid_acc = AverageMeter()
     model.train()
 
-    for i, (inputs, target) in enumerate(train_loader):
-
+    for i, batch in enumerate(train_loader):
+        if len(batch) == 4:
+            inputs, target, pid, aid = batch
+            action_target = aid.to(device, non_blocking=True)
+            pid_target = pid.to(device, non_blocking=True)
+        else:
+            inputs, target = batch
+            action_target = target.to(device, non_blocking=True)
+            pid_target = None
         inputs = inputs.to(device)
         feats = model.forward_features(inputs)
-        output = model.fc(feats)
-        target = target.to(device, non_blocking=True)
-        loss = criterion(output, target)
+        action_output, pid_output = model.forward_heads_from_features(feats)
+        loss_action = criterion(action_output, action_target)
+        loss = loss_action
+        if pid_criterion is not None and pid_output is not None and pid_target is not None:
+            loss_pid = pid_criterion(pid_output, pid_target)
+            loss = args.joint_lambda * loss_action + (1.0 - args.joint_lambda) * loss_pid
+            pid_batch_acc = accuracy(pid_output.data, pid_target, topk=(1,))[0]
+            pid_acc.update(pid_batch_acc, inputs.size(0))
         if args.metric_loss != 'none':
-            metric = metric_loss(feats, target, args)
+            metric = metric_loss(feats, action_target, args)
             loss = loss + args.metric_weight * metric
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
+        acc = accuracy(action_output.data, action_target, topk=(1, 2, 3, 4, 5))
         losses.update(loss.item(), inputs.size(0))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
@@ -192,30 +221,45 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'Top-2 accu {acc2.val:.3f} ({acc2.avg:.3f})\t'
                   'Top-3 accu {acc3.val:.3f} ({acc3.avg:.3f})\t'
                   'Top-4 accu {acc4.val:.3f} ({acc4.avg:.3f})\t'
-                  'Top-5 accu {acc5.val:.3f} ({acc5.avg:.3f})'.format(
-                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3, acc4=acc4, acc5=acc5))
+                  'Top-5 accu {acc5.val:.3f} ({acc5.avg:.3f})\t'
+                  'PID accu {pid.val:.3f} ({pid.avg:.3f})'.format(
+                   epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3, acc4=acc4, acc5=acc5, pid=pid_acc))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, pid_acc.avg
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, pid_criterion):
     losses = AverageMeter()
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
     acc4 = AverageMeter()
     acc5 = AverageMeter()
+    pid_acc = AverageMeter()
     model.eval()
 
-    for i, (inputs, target) in enumerate(val_loader):
+    for i, batch in enumerate(val_loader):
+        if len(batch) == 4:
+            inputs, target, pid, aid = batch
+            action_target = aid.to(device, non_blocking=True)
+            pid_target = pid.to(device, non_blocking=True)
+        else:
+            inputs, target = batch
+            action_target = target.to(device, non_blocking=True)
+            pid_target = None
         with torch.no_grad():
-            output = model(inputs.to(device))
-        target = target.to(device, non_blocking=True)
+            action_output, pid_output = model.forward_heads(inputs.to(device))
         with torch.no_grad():
-            loss = criterion(output, target)
+            loss_action = criterion(action_output, action_target)
+            loss = loss_action
+            if pid_criterion is not None and pid_output is not None and pid_target is not None:
+                loss_pid = pid_criterion(pid_output, pid_target)
+                loss = args.joint_lambda * loss_action + (1.0 - args.joint_lambda) * loss_pid
+                pid_batch_acc = accuracy(pid_output.data, pid_target, topk=(1,))[0]
+                pid_acc.update(pid_batch_acc, inputs.size(0))
 
         # measure accuracy and record loss
-        acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
+        acc = accuracy(action_output.data, action_target, topk=(1, 2, 3, 4, 5))
         losses.update(loss.item(), inputs.size(0))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
@@ -223,33 +267,56 @@ def validate(val_loader, model, criterion):
         acc4.update(acc[3], inputs.size(0))
         acc5.update(acc[4], inputs.size(0))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, pid_acc.avg
 
 
-def test(test_loader, model, checkpoint, lable_path, pred_path):
+def test(test_loader, model, checkpoint, lable_path, pred_path, pid_lable_path, pid_pred_path):
     acc1 = AverageMeter()
     acc2 = AverageMeter()
     acc3 = AverageMeter()
     acc4 = AverageMeter()
     acc5 = AverageMeter()
+    pid_acc = AverageMeter()
     # load learnt model that obtained best performance on validation set
-    model.load_state_dict(torch.load(checkpoint, map_location=device)['state_dict'])
+    checkpoint_state = torch.load(checkpoint, map_location=device)['state_dict']
+    if ('fc.weight' in checkpoint_state) and ('fc_action.weight' not in checkpoint_state):
+        checkpoint_state['fc_action.weight'] = checkpoint_state['fc.weight']
+        checkpoint_state['fc_action.bias'] = checkpoint_state['fc.bias']
+    model.load_state_dict(checkpoint_state, strict=False)
     model.eval()
 
     label_output = list()
     pred_output = list()
+    pid_label_output = list()
+    pid_pred_output = list()
 
     t_start = time.time()
-    for i, (inputs, target) in enumerate(test_loader):
+    for i, batch in enumerate(test_loader):
+        if len(batch) == 4:
+            inputs, target, pid, aid = batch
+            action_target = aid.to(device, non_blocking=True)
+            pid_target = pid.to(device, non_blocking=True)
+        else:
+            inputs, target = batch
+            action_target = target.to(device, non_blocking=True)
+            pid_target = None
         with torch.no_grad():
-            output = model(inputs.to(device))
-            output = output.view((-1, inputs.size(0)//target.size(0), output.size(1)))
-            output = output.mean(1)
+            action_output, pid_output = model.forward_heads(inputs.to(device))
+            action_output = action_output.view((-1, inputs.size(0)//target.size(0), action_output.size(1)))
+            action_output = action_output.mean(1)
+            if pid_output is not None:
+                pid_output = pid_output.view((-1, inputs.size(0)//target.size(0), pid_output.size(1)))
+                pid_output = pid_output.mean(1)
 
-        label_output.append(target.cpu().numpy())
-        pred_output.append(output.cpu().numpy())
+        label_output.append(action_target.cpu().numpy())
+        pred_output.append(action_output.cpu().numpy())
+        if pid_target is not None and pid_output is not None:
+            pid_label_output.append(pid_target.cpu().numpy())
+            pid_pred_output.append(pid_output.cpu().numpy())
+            pid_batch_acc = accuracy(pid_output.data, pid_target, topk=(1,))[0]
+            pid_acc.update(pid_batch_acc, inputs.size(0))
 
-        acc = accuracy(output.data, target.to(device, non_blocking=True), topk=(1, 2, 3, 4, 5))
+        acc = accuracy(action_output.data, action_target, topk=(1, 2, 3, 4, 5))
         acc1.update(acc[0], inputs.size(0))
         acc2.update(acc[1], inputs.size(0))
         acc3.update(acc[2], inputs.size(0))
@@ -261,9 +328,14 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     np.savetxt(lable_path, label_output, fmt='%d')
     pred_output = np.concatenate(pred_output, axis=0)
     np.savetxt(pred_path, pred_output, fmt='%f')
+    if len(pid_label_output) > 0 and len(pid_pred_output) > 0:
+        pid_label_output = np.concatenate(pid_label_output, axis=0)
+        np.savetxt(pid_lable_path, pid_label_output, fmt='%d')
+        pid_pred_output = np.concatenate(pid_pred_output, axis=0)
+        np.savetxt(pid_pred_path, pid_pred_output, fmt='%f')
 
-    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, Top-4 accu {:.3f}, Top-5 accu {:.3f}, time: {:.2f}s'
-          .format(acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, time.time() - t_start))
+    print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, Top-4 accu {:.3f}, Top-5 accu {:.3f}, PID accu {:.3f}, time: {:.2f}s'
+          .format(acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, pid_acc.avg, time.time() - t_start))
 
 
 def accuracy(output, target, topk=(1,)):
@@ -305,7 +377,8 @@ class LabelSmoothingLoss(nn.Module):
         pred = torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0)
         with torch.no_grad():
             true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.cls - 1))
+            if self.cls > 1:
+                true_dist.fill_(self.smoothing / (self.cls - 1))
             true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
 

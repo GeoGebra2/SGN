@@ -44,4 +44,10 @@ def add_fit_args(parser):
     args.add_argument('--metric-weight', type=float, default=1.0)
     args.add_argument('--triplet-margin', type=float, default=0.2)
     args.add_argument('--supcon-temp', type=float, default=0.07)
+    args.add_argument('--joint-pid', action='store_true',
+                      help='enable joint action/person-id training when pid metadata is available')
+    args.add_argument('--no-joint-pid', dest='joint_pid', action='store_false',
+                      help='disable joint action/person-id training')
+    args.add_argument('--joint-lambda', type=float, default=0.5,
+                      help='loss weight for action branch in joint training')
     return args
