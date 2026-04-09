@@ -50,4 +50,6 @@ def add_fit_args(parser):
                       help='disable joint action/person-id training')
     args.add_argument('--joint-lambda', type=float, default=0.5,
                       help='loss weight for action branch in joint training')
+    args.add_argument('--split-mode', type=str, default='late', choices=['head', 'late', 'middle'],
+                      help='branch split position: head (scheme A), late, middle')
     return args

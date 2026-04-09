@@ -37,6 +37,7 @@ parser.set_defaults(
     train = 0,
     seg = 20,
     joint_pid = True,
+    split_mode = 'late',
     )
 args = parser.parse_args()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -55,7 +56,7 @@ def main():
     args.joint_lambda = float(np.clip(args.joint_lambda, 0.0, 1.0))
     if args.num_pid_classes <= 0:
         args.joint_pid = False
-    print('Joint action/pid:', args.joint_pid, 'num_pid_classes:', args.num_pid_classes, 'lambda:', args.joint_lambda)
+    print('Joint action/pid:', args.joint_pid, 'num_pid_classes:', args.num_pid_classes, 'lambda:', args.joint_lambda, 'split_mode:', args.split_mode)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
 
     total = get_n_params(model)
@@ -187,8 +188,7 @@ def train(train_loader, model, criterion, pid_criterion, optimizer, epoch):
             action_target = target.to(device, non_blocking=True)
             pid_target = None
         inputs = inputs.to(device)
-        feats = model.forward_features(inputs)
-        action_output, pid_output = model.forward_heads_from_features(feats)
+        action_output, pid_output, action_feats, _ = model.forward_heads_and_features(inputs)
         loss_action = criterion(action_output, action_target)
         loss = loss_action
         if pid_criterion is not None and pid_output is not None and pid_target is not None:
@@ -197,7 +197,7 @@ def train(train_loader, model, criterion, pid_criterion, optimizer, epoch):
             pid_batch_acc = accuracy(pid_output.data, pid_target, topk=(1,))[0]
             pid_acc.update(pid_batch_acc, inputs.size(0))
         if args.metric_loss != 'none':
-            metric = metric_loss(feats, action_target, args)
+            metric = metric_loss(action_feats, action_target, args)
             loss = loss + args.metric_weight * metric
 
         # measure accuracy and record loss

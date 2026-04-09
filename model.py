@@ -13,6 +13,7 @@ class SGN(nn.Module):
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
         self.num_pid_classes = getattr(args, "num_pid_classes", 0)
+        self.split_mode = getattr(args, "split_mode", "head")
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -30,6 +31,10 @@ class SGN(nn.Module):
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.fc_action = nn.Linear(self.dim1 * 2, num_classes)
         self.fc_pid = nn.Linear(self.dim1 * 2, self.num_pid_classes) if self.num_pid_classes > 0 else None
+        self.temporal_att_action = temporal_attention(self.dim1 * 2, bias=bias) if self.split_mode in ["late", "middle"] else None
+        self.temporal_att_pid = temporal_attention(self.dim1 * 2, bias=bias) if self.split_mode in ["late", "middle"] else None
+        self.temporal_action = temporal_stack(self.dim1 * 2, bias=bias) if self.split_mode == "middle" else None
+        self.temporal_pid = temporal_stack(self.dim1 * 2, bias=bias) if self.split_mode == "middle" else None
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -41,7 +46,7 @@ class SGN(nn.Module):
         nn.init.constant_(self.gcn3.w.cnn.weight, 0)
 
 
-    def forward_features(self, input):
+    def forward_backbone_map(self, input):
         
         # Dynamic Representation
         bs, step, dim = input.size()
@@ -73,29 +78,79 @@ class SGN(nn.Module):
         # Frame-level Module
         input = input + tem1
         input = self.cnn(input)
-        input = self.temporal(input)
-        input = self.temporal_att(input)
-        # Classification
-        output = self.maxpool(input)
-        output = torch.flatten(output, 1)
+        return input
+
+    def forward_branch_features(self, input):
+        x = self.forward_backbone_map(input)
+        if self.split_mode == "middle":
+            x_action = self.temporal_action(x)
+            x_action = self.temporal_att_action(x_action)
+            x_pid = self.temporal_pid(x)
+            x_pid = self.temporal_att_pid(x_pid)
+        elif self.split_mode == "late":
+            x = self.temporal(x)
+            x_action = self.temporal_att_action(x)
+            x_pid = self.temporal_att_pid(x)
+        else:
+            x = self.temporal(x)
+            x = self.temporal_att(x)
+            x_action = x
+            x_pid = x
+        action_output = self.maxpool(x_action)
+        pid_output = self.maxpool(x_pid)
+        action_output = torch.flatten(action_output, 1)
+        pid_output = torch.flatten(pid_output, 1)
+        return action_output, pid_output
+
+    def forward_features(self, input):
+        output, _ = self.forward_branch_features(input)
         return output
 
+    def forward_heads_and_features(self, input):
+        action_feats, pid_feats = self.forward_branch_features(input)
+        action_logits = self.fc_action(action_feats)
+        pid_logits = self.fc_pid(pid_feats) if self.fc_pid is not None else None
+        return action_logits, pid_logits, action_feats, pid_feats
+
     def forward(self, input):
-        output = self.forward_features(input)
-        return self.fc_action(output)
+        action_logits, _, _, _ = self.forward_heads_and_features(input)
+        return action_logits
 
     @property
     def fc(self):
         return self.fc_action
 
     def forward_heads(self, input):
-        feats = self.forward_features(input)
-        return self.forward_heads_from_features(feats)
+        action_logits, pid_logits, _, _ = self.forward_heads_and_features(input)
+        return action_logits, pid_logits
 
     def forward_heads_from_features(self, feats):
-        action_logits = self.fc_action(feats)
-        pid_logits = self.fc_pid(feats) if self.fc_pid is not None else None
+        if isinstance(feats, (tuple, list)):
+            action_feats = feats[0]
+            pid_feats = feats[1] if len(feats) > 1 else feats[0]
+        else:
+            action_feats = feats
+            pid_feats = feats
+        action_logits = self.fc_action(action_feats)
+        pid_logits = self.fc_pid(pid_feats) if self.fc_pid is not None else None
         return action_logits, pid_logits
+
+    def forward_maps(self, input):
+        x = self.forward_backbone_map(input)
+        if self.split_mode == "middle":
+            x_action = self.temporal_action(x)
+            x_action = self.temporal_att_action(x_action)
+            x_pid = self.temporal_pid(x)
+            x_pid = self.temporal_att_pid(x_pid)
+            return x_action, x_pid
+        if self.split_mode == "late":
+            x = self.temporal(x)
+            x_action = self.temporal_att_action(x)
+            x_pid = self.temporal_att_pid(x)
+            return x_action, x_pid
+        x = self.temporal(x)
+        x = self.temporal_att(x)
+        return x, x
 
     def one_hot(self, bs, spa, tem):
 
