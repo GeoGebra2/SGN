@@ -164,13 +164,20 @@ def train(train_loader, model, criterion, optimizer, epoch):
     for i, (inputs, target) in enumerate(train_loader):
 
         inputs = inputs.cuda()
-        feats = model.forward_features(inputs)
-        output = model.fc(feats)
+        if args.proto_decompose:
+            output, feats, aux = model.forward_with_aux(inputs)
+        else:
+            feats = model.forward_features(inputs)
+            output = model.fc(feats)
+            aux = {}
         target = target.cuda(non_blocking=True)
         loss = criterion(output, target)
         if args.metric_loss != 'none':
             metric = metric_loss(feats, target, args)
             loss = loss + args.metric_weight * metric
+        if args.proto_decompose:
+            proto_rec_loss, proto_entropy_loss = prototype_terms(aux)
+            loss = loss + args.proto_weight * proto_rec_loss + args.proto_entropy_weight * proto_entropy_loss
 
         # measure accuracy and record loss
         acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
@@ -351,6 +358,14 @@ def batch_hard_triplet(feats, labels, margin):
         return feats.sum() * 0.0
     loss = F.relu(hardest_pos[valid] - hardest_neg[valid] + margin)
     return loss.mean()
+
+def prototype_terms(aux):
+    topology = aux["topology"]
+    reconstructed_topology = aux["reconstructed_topology"]
+    prototype_weights = aux["prototype_weights"]
+    rec_loss = F.mse_loss(reconstructed_topology, topology.detach())
+    entropy_loss = -(prototype_weights * torch.log(prototype_weights + 1e-12)).sum(dim=1).mean()
+    return rec_loss, entropy_loss
 
 if __name__ == '__main__':
     main()

@@ -42,4 +42,9 @@ def add_fit_args(parser):
     args.add_argument('--metric-weight', type=float, default=1.0)
     args.add_argument('--triplet-margin', type=float, default=0.2)
     args.add_argument('--supcon-temp', type=float, default=0.07)
+    args.add_argument('--proto-decompose', action='store_true')
+    args.add_argument('--proto-num', type=int, default=100)
+    args.add_argument('--proto-weight', type=float, default=0.3)
+    args.add_argument('--proto-dropout', type=float, default=0.1)
+    args.add_argument('--proto-entropy-weight', type=float, default=0.01)
     return args

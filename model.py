@@ -4,6 +4,23 @@ from torch import nn
 import torch
 import math
 
+class PrototypeDecomposer(nn.Module):
+    def __init__(self, num_joints, n_prototype=100, dropout=0.1):
+        super(PrototypeDecomposer, self).__init__()
+        self.num_joints = num_joints
+        dim = num_joints * num_joints
+        self.query = nn.Linear(dim, n_prototype, bias=False)
+        self.memory = nn.Linear(n_prototype, dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, topology):
+        bs = topology.size(0)
+        flat = topology.view(bs, -1)
+        weights = torch.softmax(self.query(flat), dim=-1)
+        reconstructed = self.memory(weights)
+        reconstructed = self.dropout(reconstructed).view(bs, self.num_joints, self.num_joints)
+        return reconstructed, weights
+
 class SGN(nn.Module):
     def __init__(self, num_classes, dataset, seg, args, bias = True):
         super(SGN, self).__init__()
@@ -12,6 +29,7 @@ class SGN(nn.Module):
         self.dataset = dataset
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
+        self.proto_decompose = getattr(args, "proto_decompose", False)
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -28,6 +46,12 @@ class SGN(nn.Module):
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
+        if self.proto_decompose:
+            proto_num = getattr(args, "proto_num", 100)
+            proto_dropout = getattr(args, "proto_dropout", 0.1)
+            self.prototype_decomposer = PrototypeDecomposer(num_joint, n_prototype=proto_num, dropout=proto_dropout)
+        else:
+            self.prototype_decomposer = None
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -39,7 +63,7 @@ class SGN(nn.Module):
         nn.init.constant_(self.gcn3.w.cnn.weight, 0)
 
 
-    def forward_features(self, input):
+    def forward_features(self, input, return_aux=False):
         
         # Dynamic Representation
         bs, step, dim = input.size()
@@ -76,12 +100,28 @@ class SGN(nn.Module):
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
+        if return_aux:
+            if self.proto_decompose and self.prototype_decomposer is not None:
+                topology = g.mean(dim=1)
+                reconstructed_topology, prototype_weights = self.prototype_decomposer(topology)
+                aux = {
+                    "topology": topology,
+                    "reconstructed_topology": reconstructed_topology,
+                    "prototype_weights": prototype_weights,
+                }
+                return output, aux
+            return output, {}
         return output
 
     def forward(self, input):
         output = self.forward_features(input)
         output = self.fc(output)
         return output
+
+    def forward_with_aux(self, input):
+        feats, aux = self.forward_features(input, return_aux=True)
+        output = self.fc(feats)
+        return output, feats, aux
 
     def one_hot(self, bs, spa, tem):
 
