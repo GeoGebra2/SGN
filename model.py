@@ -30,6 +30,9 @@ class SGN(nn.Module):
         self.seg = seg
         self.motion_only = getattr(args, "motion_only", False)
         self.proto_decompose = getattr(args, "proto_decompose", False)
+        self.part_decompose = getattr(args, "part_decompose", False)
+        self.part_sig_threshold = getattr(args, "part_sig_threshold", 0.5)
+        self.part_fuse_weight = getattr(args, "part_fuse_weight", 1.0)
         num_joint = 25
 
         self.tem_embed = embed(self.seg, 64*4, norm=False, bias=bias)
@@ -46,6 +49,21 @@ class SGN(nn.Module):
         self.gcn2 = gcn_spa(self.dim1 // 2, self.dim1, bias=bias)
         self.gcn3 = gcn_spa(self.dim1, self.dim1, bias=bias)
         self.fc = nn.Linear(self.dim1 * 2, num_classes)
+        if self.part_decompose:
+            self.part_groups = self._build_ntu_five_parts()
+            self.part_branches = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(self.dim1, self.dim1),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(self.dim1, self.dim1 * 2),
+                    nn.ReLU(),
+                )
+                for _ in self.part_groups
+            ])
+        else:
+            self.part_groups = []
+            self.part_branches = None
         if self.proto_decompose:
             proto_num = getattr(args, "proto_num", 100)
             proto_dropout = getattr(args, "proto_dropout", 0.1)
@@ -67,6 +85,7 @@ class SGN(nn.Module):
         
         # Dynamic Representation
         bs, step, dim = input.size()
+        raw_input = input
         num_joints = dim //3
         input = input.view((bs, step, num_joints, 3))
         input = input.permute(0, 3, 2, 1).contiguous()
@@ -93,6 +112,7 @@ class SGN(nn.Module):
         input = self.gcn2(input, g)
         input = self.gcn3(input, g)
         # Frame-level Module
+        joint_level_feat = input
         input = input + tem1
         input = self.cnn(input)
         input = self.temporal(input)
@@ -100,17 +120,28 @@ class SGN(nn.Module):
         # Classification
         output = self.maxpool(input)
         output = torch.flatten(output, 1)
+        if self.part_decompose and self.part_branches is not None:
+            part_scores = self._compute_part_scores(input_raw=raw_input, num_joints=num_joints)
+            part_mask = self._build_significant_mask(part_scores)
+            fused_part_feat = self._encode_part_features(joint_level_feat, part_scores, part_mask)
+            output = output + self.part_fuse_weight * fused_part_feat
         if return_aux:
+            aux = {}
+            if self.part_decompose and self.part_branches is not None:
+                aux.update({
+                    "part_scores": part_scores,
+                    "part_mask": part_mask,
+                })
             if self.proto_decompose and self.prototype_decomposer is not None:
                 topology = g.mean(dim=1)
                 reconstructed_topology, prototype_weights = self.prototype_decomposer(topology)
-                aux = {
+                aux.update({
                     "topology": topology,
                     "reconstructed_topology": reconstructed_topology,
                     "prototype_weights": prototype_weights,
-                }
+                })
                 return output, aux
-            return output, {}
+            return output, aux
         return output
 
     def forward(self, input):
@@ -135,6 +166,55 @@ class SGN(nn.Module):
         y_onehot = y_onehot.repeat(bs, tem, 1, 1)
 
         return y_onehot
+
+    def _build_ntu_five_parts(self):
+        # NTU-25 indices in zero-based format:
+        # head/trunk, left arm, right arm, left leg, right leg
+        return [
+            [0, 1, 2, 3, 20],
+            [4, 5, 6, 7, 21, 22],
+            [8, 9, 10, 11, 23, 24],
+            [12, 13, 14, 15],
+            [16, 17, 18, 19],
+        ]
+
+    def _compute_part_scores(self, input_raw, num_joints):
+        # FineTec-style significance:
+        # D_avg(i) = mean_t ||S_{t+1,i} - S_{t,i}||_2
+        bs, step, _ = input_raw.size()
+        skeleton = input_raw.view(bs, step, num_joints, 3)
+        disp = skeleton[:, 1:, :, :] - skeleton[:, :-1, :, :]
+        joint_motion = torch.norm(disp, dim=-1).mean(dim=1)
+        part_scores = []
+        for group in self.part_groups:
+            part_scores.append(joint_motion[:, group].mean(dim=1))
+        return torch.stack(part_scores, dim=1)
+
+    def _build_significant_mask(self, part_scores):
+        max_score = part_scores.max(dim=1, keepdim=True)[0]
+        normalized_scores = part_scores / (max_score + 1e-6)
+        mask = normalized_scores >= self.part_sig_threshold
+        # Guarantee at least one active local branch for each sample.
+        empty_mask = mask.sum(dim=1) == 0
+        if empty_mask.any():
+            top_idx = normalized_scores.argmax(dim=1, keepdim=True)
+            mask[empty_mask] = False
+            mask.scatter_(1, top_idx, True)
+        return mask
+
+    def _encode_part_features(self, joint_level_feat, part_scores, part_mask):
+        # joint_level_feat: [bs, C, V, T]
+        branch_features = []
+        for idx, group in enumerate(self.part_groups):
+            part_joint_feat = joint_level_feat[:, :, group, :]
+            pooled = part_joint_feat.mean(dim=(2, 3))
+            branch_features.append(self.part_branches[idx](pooled))
+        branch_features = torch.stack(branch_features, dim=1)
+
+        weighted_scores = part_scores * part_mask.float()
+        weighted_scores = weighted_scores / (weighted_scores.sum(dim=1, keepdim=True) + 1e-6)
+        fused_part_feat = (branch_features * weighted_scores.unsqueeze(-1)).sum(dim=1)
+        return fused_part_feat
 
 class norm_data(nn.Module):
     def __init__(self, dim= 64):

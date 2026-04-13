@@ -53,4 +53,10 @@ def add_fit_args(parser):
     args.add_argument('--cscl-temp', type=float, default=0.125)
     args.add_argument('--cscl-momentum', type=float, default=0.9)
     args.add_argument('--cscl-threshold', type=float, default=0.0)
+    args.add_argument('--part-decompose', action='store_true',
+                      help='enable 5-part NTU local branch learning with motion significance')
+    args.add_argument('--part-sig-threshold', type=float, default=0.5,
+                      help='relative threshold (to per-sample max part motion) for active local parts')
+    args.add_argument('--part-fuse-weight', type=float, default=1.0,
+                      help='fusion weight for local part features')
     return args

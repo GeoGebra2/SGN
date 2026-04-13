@@ -93,3 +93,5 @@ For more information see the [Code of Conduct FAQ](https://opensource.microsoft.
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
 `python main.py --network SGN --dataset NTU_ID --train 1 --case 1 --proto-decompose --proto-num 100 --proto-weight 0.1 --proto-entropy-weight 0.005 --cscl --cscl-weight 0.2 --cscl-hidden 256 --cscl-temp 0.075 --cscl-momentum 0.9 --cscl-threshold 0.0 --max-epochs 180 --lr 0.001`
+
+`python main.py --network SGN --dataset NTU_ID --train 1 --case 1 --part-decompose --part-sig-threshold 0.5 --part-fuse-weight 1.0 --max-epochs 180 --lr 0.001`
