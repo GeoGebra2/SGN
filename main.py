@@ -41,6 +41,9 @@ parser.set_defaults(
 args = parser.parse_args()
 
 def main():
+    if args.cscl and not args.proto_decompose:
+        raise ValueError('CSCL requires --proto-decompose because it uses reconstructed topology features.')
+
     ntu_loaders = NTUDataLoaders(args.dataset, args.case, seg=args.seg, args=args)
     args.num_classes = getattr(ntu_loaders, 'num_classes', None) or get_num_classes(args.dataset)
     model = SGN(args.num_classes, args.dataset, args.seg, args)
@@ -55,6 +58,16 @@ def main():
         model = model.cuda()
 
     criterion = LabelSmoothingLoss(args.num_classes, smoothing=0.1).cuda()
+    cscl_criterion = None
+    if args.cscl:
+        cscl_criterion = ClassSpecificContrastiveLoss(
+            n_class=args.num_classes,
+            n_channel=25 * 25,
+            h_channel=args.cscl_hidden,
+            tmp=args.cscl_temp,
+            mom=args.cscl_momentum,
+            pred_threshold=args.cscl_threshold,
+        ).cuda()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.monitor == 'val_acc':
@@ -102,7 +115,9 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'])
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(train_loader, model, criterion, optimizer, epoch)
+            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5 = train(
+                train_loader, model, criterion, optimizer, epoch, cscl_criterion=cscl_criterion
+            )
             val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5 = validate(val_loader, model, criterion)
             log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
                          val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5)]]
@@ -152,7 +167,7 @@ def main():
     test(test_loader, model, checkpoint, lable_path, pred_path)
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, cscl_criterion=None):
     losses = AverageMeter()
     acc1 = AverageMeter()
     acc2 = AverageMeter()
@@ -178,6 +193,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
         if args.proto_decompose:
             proto_rec_loss, proto_entropy_loss = prototype_terms(aux)
             loss = loss + args.proto_weight * proto_rec_loss + args.proto_entropy_weight * proto_entropy_loss
+        if args.cscl and cscl_criterion is not None:
+            cscl_feature = aux["reconstructed_topology"].view(inputs.size(0), -1)
+            cscl = cscl_criterion(cscl_feature, target, output)
+            loss = loss + args.cscl_weight * cscl
 
         # measure accuracy and record loss
         acc = accuracy(output.data, target, topk=(1, 2, 3, 4, 5))
@@ -316,6 +335,52 @@ class LabelSmoothingLoss(nn.Module):
             true_dist.fill_(self.smoothing / (self.cls - 1))
             true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+
+class ClassSpecificContrastiveLoss(nn.Module):
+    def __init__(self, n_class, n_channel=625, h_channel=256, tmp=0.125, mom=0.9, pred_threshold=0.0):
+        super(ClassSpecificContrastiveLoss, self).__init__()
+        self.n_channel = n_channel
+        self.h_channel = h_channel
+        self.n_class = n_class
+        self.tmp = tmp
+        self.mom = mom
+        self.pred_threshold = pred_threshold
+        self.register_buffer('avg_f', torch.randn(self.h_channel, self.n_class))
+        self.cl_fc = nn.Linear(self.n_channel, self.h_channel)
+        self.loss = nn.CrossEntropyLoss(reduction='none')
+
+    def local_average(self, feature, mask):
+        feature = feature.permute(1, 0)
+        mask_sum = mask.sum(0, keepdim=True)
+        f_mask = torch.matmul(feature, mask) / (mask_sum + 1e-12)
+        has_object = (mask_sum > 1e-8).float()
+        momentum_mask = torch.where(
+            has_object > 0.1,
+            torch.full_like(has_object, self.mom),
+            torch.ones_like(has_object),
+        )
+        f_mem = self.avg_f * momentum_mask + (1 - momentum_mask) * f_mask
+        with torch.no_grad():
+            self.avg_f.copy_(f_mem.detach())
+        return f_mem
+
+    def get_score(self, feature, f_mem):
+        feature = F.normalize(feature, p=2, dim=1)
+        f_mem = F.normalize(f_mem.permute(1, 0), p=2, dim=-1)
+        score = torch.matmul(f_mem, feature.permute(1, 0))
+        return score / self.tmp
+
+    def forward(self, feature, lbl, logit):
+        feature = self.cl_fc(feature)
+        pred = logit.max(1)[1]
+        pred_one = F.one_hot(pred, num_classes=self.n_class).float()
+        lbl_one = F.one_hot(lbl, num_classes=self.n_class).float()
+        logit = torch.softmax(logit, dim=1)
+        mask = lbl_one * pred_one
+        mask = mask * (logit > self.pred_threshold).float()
+        f_mem = self.local_average(feature, mask)
+        score_cl = self.get_score(feature, f_mem).permute(1, 0).contiguous()
+        return self.loss(score_cl, lbl).mean()
 
 def metric_loss(feats, labels, args):
     if args.metric_loss == 'supcon':

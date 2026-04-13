@@ -92,3 +92,4 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
+`python main.py --network SGN --dataset NTU_ID --train 1 --case 1 --proto-decompose --proto-num 100 --proto-weight 0.3 --proto-entropy-weight 0.01`

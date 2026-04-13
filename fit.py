@@ -47,4 +47,10 @@ def add_fit_args(parser):
     args.add_argument('--proto-weight', type=float, default=0.3)
     args.add_argument('--proto-dropout', type=float, default=0.1)
     args.add_argument('--proto-entropy-weight', type=float, default=0.01)
+    args.add_argument('--cscl', action='store_true')
+    args.add_argument('--cscl-weight', type=float, default=0.1)
+    args.add_argument('--cscl-hidden', type=int, default=256)
+    args.add_argument('--cscl-temp', type=float, default=0.125)
+    args.add_argument('--cscl-momentum', type=float, default=0.9)
+    args.add_argument('--cscl-threshold', type=float, default=0.0)
     return args
