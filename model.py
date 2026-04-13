@@ -204,16 +204,21 @@ class SGN(nn.Module):
 
     def _encode_part_features(self, joint_level_feat, part_scores, part_mask):
         # joint_level_feat: [bs, C, V, T]
-        branch_features = []
-        for idx, group in enumerate(self.part_groups):
-            part_joint_feat = joint_level_feat[:, :, group, :]
-            pooled = part_joint_feat.mean(dim=(2, 3))
-            branch_features.append(self.part_branches[idx](pooled))
-        branch_features = torch.stack(branch_features, dim=1)
-
+        bs = joint_level_feat.size(0)
+        out_dim = self.dim1 * 2
+        fused_part_feat = joint_level_feat.new_zeros(bs, out_dim)
         weighted_scores = part_scores * part_mask.float()
         weighted_scores = weighted_scores / (weighted_scores.sum(dim=1, keepdim=True) + 1e-6)
-        fused_part_feat = (branch_features * weighted_scores.unsqueeze(-1)).sum(dim=1)
+
+        # True sparse routing: only compute branch features for active samples.
+        for idx, group in enumerate(self.part_groups):
+            active_idx = torch.nonzero(part_mask[:, idx], as_tuple=False).squeeze(1)
+            if active_idx.numel() == 0:
+                continue
+            part_joint_feat = joint_level_feat[active_idx][:, :, group, :]
+            pooled = part_joint_feat.mean(dim=(2, 3))
+            part_feat = self.part_branches[idx](pooled)
+            fused_part_feat[active_idx] += weighted_scores[active_idx, idx:idx + 1] * part_feat
         return fused_part_feat
 
 class norm_data(nn.Module):
