@@ -39,6 +39,7 @@ parser.set_defaults(
     seg = 20,
     )
 args = parser.parse_args()
+PART_NAMES = ['head', 'left_arm', 'right_arm', 'left_leg', 'right_leg']
 
 def main():
     if args.cscl and not args.proto_decompose:
@@ -116,15 +117,16 @@ def main():
             print(epoch, optimizer.param_groups[0]['lr'], stage_name)
 
             t_start = time.time()
-            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5, train_branch_acc1, train_fusion_acc1 = train(
+            train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5, train_branch_acc1, train_fusion_acc1, train_part_acc = train(
                 train_loader, model, criterion, optimizer, epoch, cscl_criterion=cscl_criterion
             )
-            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5, val_branch_acc1, val_fusion_acc1 = validate(
+            val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5, val_branch_acc1, val_fusion_acc1, val_part_acc = validate(
                 val_loader, model, criterion, epoch
             )
             log_res += [[train_loss, float(train_acc1), float(train_acc2), float(train_acc3), float(train_acc4), float(train_acc5),\
-                         train_branch_acc1, train_fusion_acc1, val_loss, float(val_acc1), float(val_acc2), float(val_acc3),
-                         float(val_acc4), float(val_acc5), val_branch_acc1, val_fusion_acc1]]
+                         train_branch_acc1, train_fusion_acc1, train_part_acc[0], train_part_acc[1], train_part_acc[2], train_part_acc[3], train_part_acc[4],
+                         val_loss, float(val_acc1), float(val_acc2), float(val_acc3), float(val_acc4), float(val_acc5),
+                         val_branch_acc1, val_fusion_acc1, val_part_acc[0], val_part_acc[1], val_part_acc[2], val_part_acc[3], val_part_acc[4]]]
 
             print('Epoch-{:<3d} {:.1f}s\t'
                   'Train: loss {:.4f}\tTop-1 accu {:.4f}\tTop-2 accu {:.4f}\tTop-3 accu {:.4f}\tTop-4 accu {:.4f}\tTop-5 accu {:.4f}\t'
@@ -134,6 +136,16 @@ def main():
                   .format(epoch + 1, time.time() - t_start, train_loss, train_acc1, train_acc2, train_acc3, train_acc4, train_acc5,
                           train_branch_acc1, train_fusion_acc1, val_loss, val_acc1, val_acc2, val_acc3, val_acc4, val_acc5,
                           val_branch_acc1, val_fusion_acc1))
+            print(
+                'Part Branch Top-1 | '
+                'Train {} {:.4f}, {} {:.4f}, {} {:.4f}, {} {:.4f}, {} {:.4f} | '
+                'Valid {} {:.4f}, {} {:.4f}, {} {:.4f}, {} {:.4f}, {} {:.4f}'.format(
+                    PART_NAMES[0], train_part_acc[0], PART_NAMES[1], train_part_acc[1], PART_NAMES[2], train_part_acc[2],
+                    PART_NAMES[3], train_part_acc[3], PART_NAMES[4], train_part_acc[4],
+                    PART_NAMES[0], val_part_acc[0], PART_NAMES[1], val_part_acc[1], PART_NAMES[2], val_part_acc[2],
+                    PART_NAMES[3], val_part_acc[3], PART_NAMES[4], val_part_acc[4],
+                )
+            )
 
             if mode == 'min':
                 current = val_loss
@@ -170,8 +182,10 @@ def main():
             cw = csv.writer(fw)
             cw.writerow([
                 'loss', 'acc@1', 'acc@2', 'acc@3', 'acc@4', 'acc@5', 'branch_acc@1', 'fusion_acc@1',
+                'part_head_acc@1', 'part_left_arm_acc@1', 'part_right_arm_acc@1', 'part_left_leg_acc@1', 'part_right_leg_acc@1',
                 'val_loss', 'val_acc@1', 'val_acc@2', 'val_acc@3', 'val_acc@4', 'val_acc@5',
-                'val_branch_acc@1', 'val_fusion_acc@1'
+                'val_branch_acc@1', 'val_fusion_acc@1',
+                'val_part_head_acc@1', 'val_part_left_arm_acc@1', 'val_part_right_arm_acc@1', 'val_part_left_leg_acc@1', 'val_part_right_leg_acc@1',
             ])
             cw.writerows(log_res)
         print('Save train and validation log into into %s' % csv_file)
@@ -192,6 +206,7 @@ def train(train_loader, model, criterion, optimizer, epoch, cscl_criterion=None)
     acc5 = AverageMeter()
     branch_acc1 = AverageMeter()
     fusion_acc1 = AverageMeter()
+    part_acc1 = [AverageMeter() for _ in PART_NAMES]
     model.train()
     stage1_branch_only = bool(args.part_decompose and args.part_two_stage and epoch < args.part_branch_epochs)
 
@@ -226,6 +241,7 @@ def train(train_loader, model, criterion, optimizer, epoch, cscl_criterion=None)
         if "branch_fused_logits" in aux:
             branch_top1 = accuracy(aux["branch_fused_logits"].data, target, topk=(1,))[0]
             branch_acc1.update(branch_top1, inputs.size(0))
+        update_part_branch_meters(part_acc1, aux, target)
         fusion_acc1.update(acc[0], inputs.size(0))
 
         # backward
@@ -242,11 +258,14 @@ def train(train_loader, model, criterion, optimizer, epoch, cscl_criterion=None)
                   'Top-4 accu {acc4.val:.3f} ({acc4.avg:.3f})\t'
                   'Top-5 accu {acc5.val:.3f} ({acc5.avg:.3f})\t'
                   'Branch-only Top-1 {branch.val:.3f} ({branch.avg:.3f})\t'
-                  'Fusion Top-1 {fusion.val:.3f} ({fusion.avg:.3f})'.format(
+                  'Fusion Top-1 {fusion.val:.3f} ({fusion.avg:.3f})\t'
+                  'Part-Top1[{p0}:{p0v:.3f}, {p1}:{p1v:.3f}, {p2}:{p2v:.3f}, {p3}:{p3v:.3f}, {p4}:{p4v:.3f}]'.format(
                    epoch + 1, i + 1, loss=losses, acc1=acc1, acc2=acc2, acc3=acc3, acc4=acc4, acc5=acc5,
-                   branch=branch_acc1, fusion=fusion_acc1))
+                   branch=branch_acc1, fusion=fusion_acc1,
+                   p0=PART_NAMES[0], p1=PART_NAMES[1], p2=PART_NAMES[2], p3=PART_NAMES[3], p4=PART_NAMES[4],
+                   p0v=part_acc1[0].avg, p1v=part_acc1[1].avg, p2v=part_acc1[2].avg, p3v=part_acc1[3].avg, p4v=part_acc1[4].avg))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, branch_acc1.avg, fusion_acc1.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, branch_acc1.avg, fusion_acc1.avg, [m.avg for m in part_acc1]
 
 
 def validate(val_loader, model, criterion, epoch=0):
@@ -258,6 +277,7 @@ def validate(val_loader, model, criterion, epoch=0):
     acc5 = AverageMeter()
     branch_acc1 = AverageMeter()
     fusion_acc1 = AverageMeter()
+    part_acc1 = [AverageMeter() for _ in PART_NAMES]
     model.eval()
     stage1_branch_only = bool(args.part_decompose and args.part_two_stage and epoch < args.part_branch_epochs)
 
@@ -282,9 +302,10 @@ def validate(val_loader, model, criterion, epoch=0):
         if "branch_fused_logits" in aux:
             branch_top1 = accuracy(aux["branch_fused_logits"].data, target, topk=(1,))[0]
             branch_acc1.update(branch_top1, inputs.size(0))
+        update_part_branch_meters(part_acc1, aux, target)
         fusion_acc1.update(acc[0], inputs.size(0))
 
-    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, branch_acc1.avg, fusion_acc1.avg
+    return losses.avg, acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, branch_acc1.avg, fusion_acc1.avg, [m.avg for m in part_acc1]
 
 
 def test(test_loader, model, checkpoint, lable_path, pred_path):
@@ -295,6 +316,7 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     acc5 = AverageMeter()
     branch_acc1 = AverageMeter()
     fusion_acc1 = AverageMeter()
+    part_acc1 = [AverageMeter() for _ in PART_NAMES]
     # load learnt model that obtained best performance on validation set
     model.load_state_dict(torch.load(checkpoint)['state_dict'])
     model.eval()
@@ -327,6 +349,7 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
         if branch_output is not None:
             branch_top1 = accuracy(branch_output.data, target.cuda(non_blocking=True), topk=(1,))[0]
             branch_acc1.update(branch_top1, inputs.size(0))
+        update_part_branch_meters(part_acc1, aux, target.cuda(non_blocking=True))
         fusion_acc1.update(acc[0], inputs.size(0))
 
 
@@ -338,6 +361,12 @@ def test(test_loader, model, checkpoint, lable_path, pred_path):
     print('Test: Top-1 accu {:.3f}, Top-2 accu {:.3f}, Top-3 accu {:.3f}, Top-4 accu {:.3f}, Top-5 accu {:.3f}, '
           'Branch-only Top-1 {:.3f}, Fusion Top-1 {:.3f}, time: {:.2f}s'
           .format(acc1.avg, acc2.avg, acc3.avg, acc4.avg, acc5.avg, branch_acc1.avg, fusion_acc1.avg, time.time() - t_start))
+    print(
+        'Test Part Branch Top-1: {} {:.3f}, {} {:.3f}, {} {:.3f}, {} {:.3f}, {} {:.3f}'.format(
+            PART_NAMES[0], part_acc1[0].avg, PART_NAMES[1], part_acc1[1].avg, PART_NAMES[2], part_acc1[2].avg,
+            PART_NAMES[3], part_acc1[3].avg, PART_NAMES[4], part_acc1[4].avg
+        )
+    )
 
 
 def forward_model(inputs, model):
@@ -363,6 +392,18 @@ def branch_only_loss(aux, target, criterion):
     if not loss_terms:
         return criterion(aux["branch_fused_logits"], target)
     return torch.stack(loss_terms).mean()
+
+
+def update_part_branch_meters(part_meters, aux, target):
+    if "part_logits" not in aux or "part_mask" not in aux:
+        return
+    part_logits = aux["part_logits"]
+    part_mask = aux["part_mask"]
+    for idx in range(min(len(part_meters), part_logits.size(1))):
+        active = part_mask[:, idx]
+        if active.any():
+            part_top1 = accuracy(part_logits[active, idx, :].data, target[active], topk=(1,))[0]
+            part_meters[idx].update(part_top1, int(active.sum().item()))
 
 
 def accuracy(output, target, topk=(1,)):
