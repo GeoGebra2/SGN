@@ -61,9 +61,13 @@ class SGN(nn.Module):
                 )
                 for _ in self.part_groups
             ])
+            self.part_classifiers = nn.ModuleList([
+                nn.Linear(self.dim1 * 2, num_classes) for _ in self.part_groups
+            ])
         else:
             self.part_groups = []
             self.part_branches = None
+            self.part_classifiers = None
         if self.proto_decompose:
             proto_num = getattr(args, "proto_num", 100)
             proto_dropout = getattr(args, "proto_dropout", 0.1)
@@ -123,7 +127,9 @@ class SGN(nn.Module):
         if self.part_decompose and self.part_branches is not None:
             part_scores = self._compute_part_scores(input_raw=raw_input, num_joints=num_joints)
             part_mask = self._build_significant_mask(part_scores)
-            fused_part_feat = self._encode_part_features(joint_level_feat, part_scores, part_mask)
+            fused_part_feat, part_logits, branch_fused_logits = self._encode_part_features(
+                joint_level_feat, part_scores, part_mask
+            )
             output = output + self.part_fuse_weight * fused_part_feat
         if return_aux:
             aux = {}
@@ -131,6 +137,8 @@ class SGN(nn.Module):
                 aux.update({
                     "part_scores": part_scores,
                     "part_mask": part_mask,
+                    "part_logits": part_logits,
+                    "branch_fused_logits": branch_fused_logits,
                 })
             if self.proto_decompose and self.prototype_decomposer is not None:
                 topology = g.mean(dim=1)
@@ -207,6 +215,7 @@ class SGN(nn.Module):
         bs = joint_level_feat.size(0)
         out_dim = self.dim1 * 2
         fused_part_feat = joint_level_feat.new_zeros(bs, out_dim)
+        part_logits = joint_level_feat.new_zeros(bs, len(self.part_groups), self.fc.out_features)
         weighted_scores = part_scores * part_mask.float()
         weighted_scores = weighted_scores / (weighted_scores.sum(dim=1, keepdim=True) + 1e-6)
 
@@ -218,8 +227,10 @@ class SGN(nn.Module):
             part_joint_feat = joint_level_feat[active_idx][:, :, group, :]
             pooled = part_joint_feat.mean(dim=(2, 3))
             part_feat = self.part_branches[idx](pooled)
+            part_logits[active_idx, idx, :] = self.part_classifiers[idx](part_feat)
             fused_part_feat[active_idx] += weighted_scores[active_idx, idx:idx + 1] * part_feat
-        return fused_part_feat
+        branch_fused_logits = (part_logits * weighted_scores.unsqueeze(-1)).sum(dim=1)
+        return fused_part_feat, part_logits, branch_fused_logits
 
 class norm_data(nn.Module):
     def __init__(self, dim= 64):

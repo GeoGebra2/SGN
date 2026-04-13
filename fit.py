@@ -59,4 +59,8 @@ def add_fit_args(parser):
                       help='relative threshold (to per-sample max part motion) for active local parts')
     args.add_argument('--part-fuse-weight', type=float, default=1.0,
                       help='fusion weight for local part features')
+    args.add_argument('--part-two-stage', action='store_true',
+                      help='enable two-stage protocol: branch-only stage then fusion stage')
+    args.add_argument('--part-branch-epochs', type=int, default=60,
+                      help='number of epochs for stage-1 branch-only training when --part-two-stage is enabled')
     return args
