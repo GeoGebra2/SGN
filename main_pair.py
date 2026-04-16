@@ -179,10 +179,18 @@ class SGNPairDataset(Dataset):
 
 
 class SGNPairMatcher(nn.Module):
-    def __init__(self, encoder: SGN, hidden_dim: int = 512, dropout: float = 0.5) -> None:
+    def __init__(
+        self,
+        encoder_q: SGN,
+        encoder_r: Optional[SGN] = None,
+        hidden_dim: int = 512,
+        dropout: float = 0.5,
+    ) -> None:
         super().__init__()
-        self.encoder = encoder
-        feat_dim = int(self.encoder.fc.in_features)
+        self.encoder_q = encoder_q
+        self.encoder_r = encoder_q if encoder_r is None else encoder_r
+        self.shared = self.encoder_q is self.encoder_r
+        feat_dim = int(self.encoder_q.fc.in_features)
         in_dim = feat_dim * 4
         hidden2 = max(128, hidden_dim // 2)
         self.head = nn.Sequential(
@@ -196,8 +204,8 @@ class SGNPairMatcher(nn.Module):
         )
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        f1 = self.encoder.forward_features(x1)
-        f2 = self.encoder.forward_features(x2)
+        f1 = self.encoder_q.forward_features(x1)
+        f2 = self.encoder_r.forward_features(x2)
         fused = torch.cat([f1, f2, torch.abs(f1 - f2), f1 * f2], dim=1)
         logits = self.head(fused).squeeze(1)
         return logits
@@ -248,7 +256,7 @@ def compute_auc_eer(labels: torch.Tensor, probs: torch.Tensor) -> Tuple[float, f
     tpr = np.r_[0.0, tpr, 1.0]
     fpr = np.r_[0.0, fpr, 1.0]
 
-    auc = float(np.trapz(tpr, fpr))
+    auc = float(np.trapezoid(tpr, fpr))
     fnr = 1.0 - tpr
     idx = int(np.argmin(np.abs(fnr - fpr)))
     eer = float((fnr[idx] + fpr[idx]) * 0.5)
@@ -367,7 +375,10 @@ def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, epo
 
 
 def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, device: torch.device) -> Tuple[int, float]:
-    ckpt = torch.load(path, map_location=device)
+    try:
+        ckpt = torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        ckpt = torch.load(path, map_location=device)
     model.load_state_dict(ckpt["state_dict"])
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
@@ -440,6 +451,13 @@ def parse_args():
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--motion-only", action="store_true")
     parser.add_argument(
+        "--pair-arch",
+        type=str,
+        default="B",
+        choices=["A", "B"],
+        help="A=共享双分支, B=双塔不共享（LAN风格）",
+    )
+    parser.add_argument(
         "--hard-negative-ratio",
         type=float,
         default=0.5,
@@ -454,8 +472,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_loader, val_loader, test_loader, num_classes = build_pair_loaders(args)
-    encoder = SGN(num_classes=num_classes, dataset="NTU_ID", seg=args.seg, args=args)
-    model = SGNPairMatcher(encoder=encoder).to(device)
+    encoder_q = SGN(num_classes=num_classes, dataset="NTU_ID", seg=args.seg, args=args)
+    if args.pair_arch == "B":
+        encoder_r = SGN(num_classes=num_classes, dataset="NTU_ID", seg=args.seg, args=args)
+    else:
+        encoder_r = None
+    model = SGNPairMatcher(encoder_q=encoder_q, encoder_r=encoder_r).to(device)
+    print(f"Pair architecture: {args.pair_arch} ({'non-shared' if args.pair_arch == 'B' else 'shared'})")
 
     criterion = nn.BCEWithLogitsLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
