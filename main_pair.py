@@ -20,6 +20,44 @@ def seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def sanitize_split(
+    x: np.ndarray,
+    y: np.ndarray,
+    aid: Optional[np.ndarray],
+    split_name: str,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    valid_idx: List[int] = []
+    invalid_nan_inf = 0
+    invalid_empty = 0
+
+    for i in range(len(y)):
+        seq = np.asarray(x[i])
+        if seq.ndim != 2:
+            invalid_empty += 1
+            continue
+        if not np.isfinite(seq).all():
+            invalid_nan_inf += 1
+            continue
+        # 至少有一个非零帧，避免纯空样本进入训练
+        if np.all(seq == 0):
+            invalid_empty += 1
+            continue
+        valid_idx.append(i)
+
+    if len(valid_idx) == 0:
+        raise ValueError(f"{split_name} split has no valid samples after sanitization.")
+
+    x_clean = x[valid_idx]
+    y_clean = y[valid_idx]
+    aid_clean = aid[valid_idx] if aid is not None else None
+
+    print(
+        f"[Sanitize:{split_name}] total={len(y)} valid={len(valid_idx)} "
+        f"drop_nan_inf={invalid_nan_inf} drop_empty={invalid_empty}"
+    )
+    return x_clean, y_clean, aid_clean
+
+
 class SGNPairDataset(Dataset):
     def __init__(
         self,
@@ -91,6 +129,7 @@ class SGNPairDataset(Dataset):
 
     def _preprocess_single(self, seq: np.ndarray) -> torch.Tensor:
         seq = np.asarray(seq, dtype=np.float32)
+        seq = np.nan_to_num(seq, nan=0.0, posinf=0.0, neginf=0.0)
         if seq.ndim != 2:
             seq = np.zeros((self.seg, 150), dtype=np.float32)
 
@@ -118,6 +157,7 @@ class SGNPairDataset(Dataset):
             offsets = np.arange(self.seg) * avg_duration + (avg_duration // 2)
         offsets = np.clip(offsets, 0, frames - 1)
         seq = seq[offsets].astype(np.float32)
+        seq = np.nan_to_num(seq, nan=0.0, posinf=0.0, neginf=0.0)
         return torch.from_numpy(seq)
 
     def _sample_negative(self, anchor_idx: int, anchor_label: int) -> int:
@@ -224,29 +264,46 @@ def run_epoch(
 ) -> Tuple[float, Dict[str, float]]:
     model.train()
     total_loss = 0.0
+    total_seen = 0
     all_logits: List[torch.Tensor] = []
     all_labels: List[torch.Tensor] = []
+    skipped_batches = 0
 
     for x1, x2, labels in loader:
         x1 = x1.to(device, non_blocking=True)
         x2 = x2.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        if (not torch.isfinite(x1).all()) or (not torch.isfinite(x2).all()) or (not torch.isfinite(labels).all()):
+            skipped_batches += 1
+            continue
 
         logits = model(x1, x2)
+        if not torch.isfinite(logits).all():
+            skipped_batches += 1
+            continue
         loss = criterion(logits, labels)
+        if not torch.isfinite(loss):
+            skipped_batches += 1
+            continue
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item() * labels.size(0)
+        total_seen += labels.size(0)
         all_logits.append(logits.detach())
         all_labels.append(labels.detach())
+
+    if skipped_batches > 0:
+        print(f"[Warn] skipped {skipped_batches} non-finite batches during training")
+    if len(all_logits) == 0:
+        return float("nan"), {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
     metrics = compute_metrics(logits, labels)
-    return total_loss / max(1, len(loader.dataset)), metrics
+    return total_loss / max(1, total_seen), metrics
 
 
 @torch.no_grad()
@@ -258,25 +315,42 @@ def evaluate(
 ) -> Tuple[float, Dict[str, float]]:
     model.eval()
     total_loss = 0.0
+    total_seen = 0
     all_logits: List[torch.Tensor] = []
     all_labels: List[torch.Tensor] = []
+    skipped_batches = 0
 
     for x1, x2, labels in loader:
         x1 = x1.to(device, non_blocking=True)
         x2 = x2.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        if (not torch.isfinite(x1).all()) or (not torch.isfinite(x2).all()) or (not torch.isfinite(labels).all()):
+            skipped_batches += 1
+            continue
 
         logits = model(x1, x2)
+        if not torch.isfinite(logits).all():
+            skipped_batches += 1
+            continue
         loss = criterion(logits, labels)
+        if not torch.isfinite(loss):
+            skipped_batches += 1
+            continue
 
         total_loss += loss.item() * labels.size(0)
+        total_seen += labels.size(0)
         all_logits.append(logits)
         all_labels.append(labels)
+
+    if skipped_batches > 0:
+        print(f"[Warn] skipped {skipped_batches} non-finite batches during eval")
+    if len(all_logits) == 0:
+        return float("nan"), {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
     metrics = compute_metrics(logits, labels)
-    return total_loss / max(1, len(loader.dataset)), metrics
+    return total_loss / max(1, total_seen), metrics
 
 
 def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, epoch: int, best_f1: float) -> None:
@@ -302,10 +376,13 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, dev
 
 def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
     ntu = NTUDataLoaders(dataset="NTU_ID", case=args.case, seg=args.seg, aug=0, args=args)
+    train_x, train_y, train_aid = sanitize_split(ntu.train_X, ntu.train_Y, ntu.train_aid, "train")
+    val_x, val_y, val_aid = sanitize_split(ntu.val_X, ntu.val_Y, ntu.val_aid, "val")
+    test_x, test_y, test_aid = sanitize_split(ntu.test_X, ntu.test_Y, ntu.test_aid, "test")
     train_set = SGNPairDataset(
-        ntu.train_X,
-        ntu.train_Y,
-        aid=ntu.train_aid,
+        train_x,
+        train_y,
+        aid=train_aid,
         seg=args.seg,
         pairs_per_epoch=args.train_pairs,
         train=True,
@@ -313,9 +390,9 @@ def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
         hard_negative_ratio=args.hard_negative_ratio,
     )
     val_set = SGNPairDataset(
-        ntu.val_X,
-        ntu.val_Y,
-        aid=ntu.val_aid,
+        val_x,
+        val_y,
+        aid=val_aid,
         seg=args.seg,
         pairs_per_epoch=args.val_pairs,
         train=False,
@@ -323,9 +400,9 @@ def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
         hard_negative_ratio=args.hard_negative_ratio,
     )
     test_set = SGNPairDataset(
-        ntu.test_X,
-        ntu.test_Y,
-        aid=ntu.test_aid,
+        test_x,
+        test_y,
+        aid=test_aid,
         seg=args.seg,
         pairs_per_epoch=args.test_pairs,
         train=False,
