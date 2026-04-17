@@ -95,4 +95,4 @@ contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additio
 `python main_pair.py --train 1 --case 1 --hard-negative-ratio 0.7`
 
 生成primitive:
-` python data/ntu/build_primitive_dataset.py --source_h5 data/ntu/NTU_ID_CV.h5 --out_h5 data/ntu/NTU_PRIM_CV.h5 --label_mode id --extract_mode paper --out_len 20 --min_len 4 --max_segments 6 --beta_v 0.02 --beta_s 0.002 --max_len 80 --dpm_components 128 --dpm_decimate 5 --dpm_accept_ratio 0.8`
+`python data/ntu/build_primitive_dataset.py --source_h5 data/ntu/NTU_ID_CV.h5 --out_h5 data/ntu/NTU_PRIM_CV.h5 --label_mode id --extract_mode paper --out_len 20 --min_len 4 --max_segments 6 --beta_v 0.02 --beta_s 0.002 --max_len 80 --dpm_components 128 --dpm_decimate 5 --dpm_accept_ratio 0.8`

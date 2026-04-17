@@ -450,12 +450,20 @@ def _segment_primitives_heuristic(seq150, out_len, min_len, max_segments):
     return prims, feats, gids
 
 
-def _extract_split(x, y, split_name, out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len):
+def _extract_split(x, y, pid, aid, split_name, out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len):
     samples = []
     feats = []
     metas = []
     gids = []
     y = _to_label(y)
+    if pid is None:
+        pid = np.arange(x.shape[0], dtype=np.int64)
+    else:
+        pid = np.asarray(pid).astype(np.int64)
+    if aid is None:
+        aid = np.full((x.shape[0],), -1, dtype=np.int64)
+    else:
+        aid = np.asarray(aid).astype(np.int64)
     for i in range(x.shape[0]):
         if extract_mode == 'paper':
             prims, fts, gset = _segment_primitives_paper(
@@ -479,7 +487,7 @@ def _extract_split(x, y, split_name, out_len, min_len, max_segments, extract_mod
             sample[:, :75] = p
             samples.append(sample)
             feats.append(f)
-            metas.append((split_name, int(i), int(y[i])))
+            metas.append((split_name, int(i), int(y[i]), int(pid[i]), int(aid[i])))
             gids.append(int(gid))
     return samples, feats, metas, gids
 
@@ -587,13 +595,19 @@ def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segmen
     with h5py.File(source_h5, 'r') as f:
         x_train = f['x'][:]
         y_train = f['y'][:]
+        pid_train = f['pid'][:] if 'pid' in f else None
+        aid_train = f['aid'][:] if 'aid' in f else None
         x_val = f['valid_x'][:]
         y_val = f['valid_y'][:]
+        pid_val = f['valid_pid'][:] if 'valid_pid' in f else None
+        aid_val = f['valid_aid'][:] if 'valid_aid' in f else None
         x_test = f['test_x'][:]
         y_test = f['test_y'][:]
-    tr_samples, tr_feats, tr_meta, tr_gids = _extract_split(x_train, y_train, 'train', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
-    va_samples, va_feats, va_meta, va_gids = _extract_split(x_val, y_val, 'val', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
-    te_samples, te_feats, te_meta, te_gids = _extract_split(x_test, y_test, 'test', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
+        pid_test = f['test_pid'][:] if 'test_pid' in f else None
+        aid_test = f['test_aid'][:] if 'test_aid' in f else None
+    tr_samples, tr_feats, tr_meta, tr_gids = _extract_split(x_train, y_train, pid_train, aid_train, 'train', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
+    va_samples, va_feats, va_meta, va_gids = _extract_split(x_val, y_val, pid_val, aid_val, 'val', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
+    te_samples, te_feats, te_meta, te_gids = _extract_split(x_test, y_test, pid_test, aid_test, 'test', out_len, min_len, max_segments, extract_mode, beta_v, beta_s, max_len)
     if len(tr_samples) == 0:
         raise RuntimeError('No primitive samples extracted from training split.')
     if label_mode == 'cluster':
@@ -658,15 +672,18 @@ def build_primitive_h5(source_h5, out_h5, clusters, out_len, min_len, max_segmen
         f.create_dataset('valid_y', data=_one_hot(va_labels, n_clusters))
         f.create_dataset('test_x', data=te_x)
         f.create_dataset('test_y', data=_one_hot(te_labels, n_clusters))
-        f.create_dataset('pid', data=np.array([m[1] for m in tr_meta], dtype=np.int64))
-        f.create_dataset('valid_pid', data=np.array([m[1] for m in va_meta], dtype=np.int64))
-        f.create_dataset('test_pid', data=np.array([m[1] for m in te_meta], dtype=np.int64))
-        f.create_dataset('aid', data=np.array([m[2] for m in tr_meta], dtype=np.int64))
-        f.create_dataset('valid_aid', data=np.array([m[2] for m in va_meta], dtype=np.int64))
-        f.create_dataset('test_aid', data=np.array([m[2] for m in te_meta], dtype=np.int64))
-        f.create_dataset('src_action', data=np.array([m[2] for m in tr_meta], dtype=np.int64))
-        f.create_dataset('valid_src_action', data=np.array([m[2] for m in va_meta], dtype=np.int64))
-        f.create_dataset('test_src_action', data=np.array([m[2] for m in te_meta], dtype=np.int64))
+        f.create_dataset('pid', data=np.array([m[3] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_pid', data=np.array([m[3] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_pid', data=np.array([m[3] for m in te_meta], dtype=np.int64))
+        f.create_dataset('aid', data=np.array([m[4] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_aid', data=np.array([m[4] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_aid', data=np.array([m[4] for m in te_meta], dtype=np.int64))
+        f.create_dataset('src_label', data=np.array([m[2] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_src_label', data=np.array([m[2] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_src_label', data=np.array([m[2] for m in te_meta], dtype=np.int64))
+        f.create_dataset('src_action', data=np.array([m[4] for m in tr_meta], dtype=np.int64))
+        f.create_dataset('valid_src_action', data=np.array([m[4] for m in va_meta], dtype=np.int64))
+        f.create_dataset('test_src_action', data=np.array([m[4] for m in te_meta], dtype=np.int64))
         f.create_dataset('class_ids', data=class_ids.astype(np.int64))
     print('Saved primitive dataset to', out_h5)
     print('Primitive classes:', n_clusters)
