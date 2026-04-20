@@ -211,9 +211,9 @@ class SGNPairMatcher(nn.Module):
         return logits
 
 
-def compute_metrics(logits: torch.Tensor, labels: torch.Tensor) -> Dict[str, float]:
+def compute_metrics(logits: torch.Tensor, labels: torch.Tensor, threshold: float = 0.5) -> Dict[str, float]:
     probs = torch.sigmoid(logits)
-    preds = (probs >= 0.5).float()
+    preds = (probs > float(threshold)).float()
     labels = labels.float()
 
     tp = ((preds == 1) & (labels == 1)).sum().item()
@@ -228,6 +228,24 @@ def compute_metrics(logits: torch.Tensor, labels: torch.Tensor) -> Dict[str, flo
     f1 = 2 * precision * recall / max(1e-12, precision + recall)
     auc, eer = compute_auc_eer(labels, probs)
     return {"acc": acc, "precision": precision, "recall": recall, "f1": f1, "auc": auc, "eer": eer}
+
+
+def tune_threshold_for_f1(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    min_thr: float = 0.1,
+    max_thr: float = 0.9,
+    steps: int = 81,
+) -> Tuple[float, Dict[str, float]]:
+    steps = max(2, int(steps))
+    best_thr = float(min_thr)
+    best_m = compute_metrics(logits, labels, threshold=best_thr)
+    for thr in np.linspace(min_thr, max_thr, steps):
+        m = compute_metrics(logits, labels, threshold=float(thr))
+        if m["f1"] > best_m["f1"]:
+            best_m = m
+            best_thr = float(thr)
+    return best_thr, best_m
 
 
 def compute_auc_eer(labels: torch.Tensor, probs: torch.Tensor) -> Tuple[float, float]:
@@ -269,6 +287,7 @@ def run_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
+    threshold: float = 0.5,
 ) -> Tuple[float, Dict[str, float]]:
     model.train()
     total_loss = 0.0
@@ -310,7 +329,7 @@ def run_epoch(
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
-    metrics = compute_metrics(logits, labels)
+    metrics = compute_metrics(logits, labels, threshold=threshold)
     return total_loss / max(1, total_seen), metrics
 
 
@@ -320,7 +339,9 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> Tuple[float, Dict[str, float]]:
+    threshold: float = 0.5,
+    return_outputs: bool = False,
+) -> Tuple[float, Dict[str, float], Optional[torch.Tensor], Optional[torch.Tensor]]:
     model.eval()
     total_loss = 0.0
     total_seen = 0
@@ -353,20 +374,33 @@ def evaluate(
     if skipped_batches > 0:
         print(f"[Warn] skipped {skipped_batches} non-finite batches during eval")
     if len(all_logits) == 0:
-        return float("nan"), {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
+        empty_m = {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
+        if return_outputs:
+            return float("nan"), empty_m, None, None
+        return float("nan"), empty_m, None, None
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
-    metrics = compute_metrics(logits, labels)
-    return total_loss / max(1, total_seen), metrics
+    metrics = compute_metrics(logits, labels, threshold=threshold)
+    if return_outputs:
+        return total_loss / max(1, total_seen), metrics, logits, labels
+    return total_loss / max(1, total_seen), metrics, None, None
 
 
-def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, epoch: int, best_f1: float) -> None:
+def save_checkpoint(
+    path: str,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    epoch: int,
+    best_f1: float,
+    best_threshold: float,
+) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(
         {
             "epoch": epoch,
             "best_f1": best_f1,
+            "best_threshold": best_threshold,
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
         },
@@ -374,7 +408,7 @@ def save_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, epo
     )
 
 
-def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, device: torch.device) -> Tuple[int, float]:
+def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, device: torch.device) -> Tuple[int, float, float]:
     try:
         ckpt = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
@@ -382,7 +416,7 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, dev
     model.load_state_dict(ckpt["state_dict"])
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
-    return int(ckpt.get("epoch", 0)), float(ckpt.get("best_f1", 0.0))
+    return int(ckpt.get("epoch", 0)), float(ckpt.get("best_f1", 0.0)), float(ckpt.get("best_threshold", 0.5))
 
 
 def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
@@ -450,6 +484,10 @@ def parse_args():
     parser.add_argument("--save-dir", type=str, default="./results/NTU_ID/SGN_PAIR_A")
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--motion-only", action="store_true")
+    parser.add_argument("--decision-threshold", type=float, default=0.5)
+    parser.add_argument("--thresh-min", type=float, default=0.1)
+    parser.add_argument("--thresh-max", type=float, default=0.9)
+    parser.add_argument("--thresh-steps", type=int, default=81)
     parser.add_argument(
         "--pair-arch",
         type=str,
@@ -485,35 +523,64 @@ def main():
 
     start_epoch = 0
     best_f1 = 0.0
+    best_threshold = float(args.decision_threshold)
     best_path = os.path.join(args.save_dir, f"case{args.case}_best.pth")
 
     if args.resume:
-        start_epoch, best_f1 = load_checkpoint(args.resume, model, optimizer, device)
-        print(f"Resume from {args.resume}, epoch={start_epoch}, best_f1={best_f1:.4f}")
+        start_epoch, best_f1, best_threshold = load_checkpoint(args.resume, model, optimizer, device)
+        print(f"Resume from {args.resume}, epoch={start_epoch}, best_f1={best_f1:.4f}, best_thr={best_threshold:.3f}")
 
     if args.train == 1:
         for epoch in range(start_epoch, args.epochs):
-            tr_loss, tr_m = run_epoch(model, train_loader, criterion, optimizer, device)
-            va_loss, va_m = evaluate(model, val_loader, criterion, device)
+            tr_loss, tr_m = run_epoch(
+                model, train_loader, criterion, optimizer, device, threshold=args.decision_threshold
+            )
+            va_loss, va_m, va_logits, va_labels = evaluate(
+                model, val_loader, criterion, device, threshold=args.decision_threshold, return_outputs=True
+            )
+            if va_logits is not None and va_labels is not None:
+                tuned_thr, va_m_tuned = tune_threshold_for_f1(
+                    va_logits,
+                    va_labels,
+                    min_thr=args.thresh_min,
+                    max_thr=args.thresh_max,
+                    steps=args.thresh_steps,
+                )
+            else:
+                tuned_thr, va_m_tuned = float(args.decision_threshold), va_m
             print(
                 f"Epoch {epoch + 1:03d} | "
                 f"Train loss {tr_loss:.4f} acc {tr_m['acc']:.4f} f1 {tr_m['f1']:.4f} auc {tr_m['auc']:.4f} eer {tr_m['eer']:.4f} | "
-                f"Val loss {va_loss:.4f} acc {va_m['acc']:.4f} f1 {va_m['f1']:.4f} auc {va_m['auc']:.4f} eer {va_m['eer']:.4f}"
+                f"Val loss {va_loss:.4f} acc {va_m_tuned['acc']:.4f} f1 {va_m_tuned['f1']:.4f} auc {va_m_tuned['auc']:.4f} eer {va_m_tuned['eer']:.4f} thr {tuned_thr:.3f}"
             )
-            if va_m["f1"] >= best_f1:
-                best_f1 = va_m["f1"]
-                save_checkpoint(best_path, model, optimizer, epoch + 1, best_f1)
-                print(f"Saved best checkpoint to {best_path} (f1={best_f1:.4f})")
+            if va_m_tuned["f1"] >= best_f1:
+                best_f1 = va_m_tuned["f1"]
+                best_threshold = tuned_thr
+                save_checkpoint(best_path, model, optimizer, epoch + 1, best_f1, best_threshold)
+                print(f"Saved best checkpoint to {best_path} (f1={best_f1:.4f}, thr={best_threshold:.3f})")
 
     if os.path.exists(best_path):
-        load_checkpoint(best_path, model, optimizer=None, device=device)
-        print(f"Loaded best checkpoint: {best_path}")
+        _, best_f1, best_threshold = load_checkpoint(best_path, model, optimizer=None, device=device)
+        print(f"Loaded best checkpoint: {best_path} (f1={best_f1:.4f}, thr={best_threshold:.3f})")
 
-    te_loss, te_m = evaluate(model, test_loader, criterion, device)
+    if args.train == 0:
+        _, va_m, va_logits, va_labels = evaluate(
+            model, val_loader, criterion, device, threshold=args.decision_threshold, return_outputs=True
+        )
+        if va_logits is not None and va_labels is not None:
+            best_threshold, _ = tune_threshold_for_f1(
+                va_logits,
+                va_labels,
+                min_thr=args.thresh_min,
+                max_thr=args.thresh_max,
+                steps=args.thresh_steps,
+            )
+
+    te_loss, te_m, _, _ = evaluate(model, test_loader, criterion, device, threshold=best_threshold, return_outputs=False)
     print(
         f"Test  | loss {te_loss:.4f} acc {te_m['acc']:.4f} "
         f"precision {te_m['precision']:.4f} recall {te_m['recall']:.4f} "
-        f"f1 {te_m['f1']:.4f} auc {te_m['auc']:.4f} eer {te_m['eer']:.4f}"
+        f"f1 {te_m['f1']:.4f} auc {te_m['auc']:.4f} eer {te_m['eer']:.4f} thr {best_threshold:.3f}"
     )
 
 
