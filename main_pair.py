@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -209,6 +210,28 @@ class SGNPairMatcher(nn.Module):
         fused = torch.cat([f1, f2, torch.abs(f1 - f2), f1 * f2], dim=1)
         logits = self.head(fused).squeeze(1)
         return logits
+
+
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean") -> None:
+        super().__init__()
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.float()
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probs = torch.sigmoid(logits)
+        pt = targets * probs + (1.0 - targets) * (1.0 - probs)
+        alpha_t = targets * self.alpha + (1.0 - targets) * (1.0 - self.alpha)
+        focal_weight = alpha_t * torch.pow((1.0 - pt).clamp(min=1e-8), self.gamma)
+        loss = focal_weight * bce
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 
 def compute_metrics(logits: torch.Tensor, labels: torch.Tensor, threshold: float = 0.5) -> Dict[str, float]:
@@ -475,6 +498,20 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--loss-type", type=str, default="bce", choices=["bce", "bce_pos", "focal"])
+    parser.add_argument(
+        "--pos-weight",
+        type=float,
+        default=1.0,
+        help="用于 bce_pos；>1 提高正类权重，<1 降低正类权重（可抑制过度报正）",
+    )
+    parser.add_argument(
+        "--focal-alpha",
+        type=float,
+        default=0.25,
+        help="用于 focal；正类权重系数，过度报正可尝试更小值如 0.15",
+    )
+    parser.add_argument("--focal-gamma", type=float, default=2.0, help="用于 focal；难样本聚焦强度")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--train", type=int, default=1, choices=[0, 1])
@@ -518,7 +555,14 @@ def main():
     model = SGNPairMatcher(encoder_q=encoder_q, encoder_r=encoder_r).to(device)
     print(f"Pair architecture: {args.pair_arch} ({'non-shared' if args.pair_arch == 'B' else 'shared'})")
 
-    criterion = nn.BCEWithLogitsLoss().to(device)
+    if args.loss_type == "bce_pos":
+        pos_weight = torch.tensor([float(args.pos_weight)], dtype=torch.float32, device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(device)
+    elif args.loss_type == "focal":
+        criterion = BinaryFocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma, reduction="mean").to(device)
+    else:
+        criterion = nn.BCEWithLogitsLoss().to(device)
+    print(f"Loss: {args.loss_type}")
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     start_epoch = 0
