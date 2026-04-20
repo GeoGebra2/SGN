@@ -70,6 +70,7 @@ class SGNPairDataset(Dataset):
         train: bool = True,
         seed: int = 1337,
         hard_negative_ratio: float = 0.0,
+        neg_pos_ratio: float = 1.0,
     ) -> None:
         self.x = x
         self.y = y.astype(np.int64)
@@ -79,6 +80,7 @@ class SGNPairDataset(Dataset):
         self.train = train
         self.rng = np.random.default_rng(seed)
         self.hard_negative_ratio = float(np.clip(hard_negative_ratio, 0.0, 1.0))
+        self.neg_pos_ratio = max(0.0, float(neg_pos_ratio))
 
         self.label_to_indices: Dict[int, np.ndarray] = {}
         for label in np.unique(self.y):
@@ -112,7 +114,8 @@ class SGNPairDataset(Dataset):
         del idx
         anchor_idx = int(self.rng.integers(0, len(self.y)))
         anchor_label = int(self.y[anchor_idx])
-        same_pair = int(self.rng.integers(0, 2))
+        pos_prob = 1.0 / (1.0 + self.neg_pos_ratio)
+        same_pair = int(float(self.rng.random()) < pos_prob)
 
         if same_pair == 1 and anchor_label in self.same_capable_labels:
             candidates = self.label_to_indices[anchor_label]
@@ -249,26 +252,53 @@ def compute_metrics(logits: torch.Tensor, labels: torch.Tensor, threshold: float
     precision = tp / max(1, tp + fp)
     recall = tp / max(1, tp + fn)
     f1 = 2 * precision * recall / max(1e-12, precision + recall)
+    beta = 0.5
+    beta2 = beta * beta
+    f05 = (1.0 + beta2) * precision * recall / max(1e-12, beta2 * precision + recall)
+    pred_pos_rate = preds.mean().item() if preds.numel() > 0 else 0.0
     auc, eer = compute_auc_eer(labels, probs)
-    return {"acc": acc, "precision": precision, "recall": recall, "f1": f1, "auc": auc, "eer": eer}
+    return {
+        "acc": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "f0.5": f05,
+        "pred_pos_rate": pred_pos_rate,
+        "auc": auc,
+        "eer": eer,
+    }
 
 
-def tune_threshold_for_f1(
+def tune_threshold(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    min_thr: float = 0.1,
-    max_thr: float = 0.9,
+    objective: str = "f0.5",
+    min_thr: float = 0.5,
+    max_thr: float = 0.99,
     steps: int = 81,
+    target_precision: float = 0.7,
 ) -> Tuple[float, Dict[str, float]]:
     steps = max(2, int(steps))
     best_thr = float(min_thr)
     best_m = compute_metrics(logits, labels, threshold=best_thr)
+    best_score = _threshold_score(best_m, objective=objective, target_precision=target_precision)
     for thr in np.linspace(min_thr, max_thr, steps):
         m = compute_metrics(logits, labels, threshold=float(thr))
-        if m["f1"] > best_m["f1"]:
+        score = _threshold_score(m, objective=objective, target_precision=target_precision)
+        if score > best_score:
             best_m = m
             best_thr = float(thr)
+            best_score = score
     return best_thr, best_m
+
+
+def _threshold_score(metrics: Dict[str, float], objective: str, target_precision: float) -> Tuple[float, float, float, float]:
+    if objective == "precision_priority":
+        feasible = 1.0 if metrics["precision"] >= float(target_precision) else 0.0
+        return (feasible, metrics["f0.5"] if feasible > 0 else metrics["precision"], metrics["precision"], metrics["f1"])
+    if objective == "f1":
+        return (metrics["f1"], metrics["precision"], -metrics["recall"], -metrics["pred_pos_rate"])
+    return (metrics["f0.5"], metrics["precision"], -metrics["recall"], -metrics["pred_pos_rate"])
 
 
 def compute_auc_eer(labels: torch.Tensor, probs: torch.Tensor) -> Tuple[float, float]:
@@ -348,7 +378,7 @@ def run_epoch(
     if skipped_batches > 0:
         print(f"[Warn] skipped {skipped_batches} non-finite batches during training")
     if len(all_logits) == 0:
-        return float("nan"), {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
+        return float("nan"), {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "f0.5": 0.0, "pred_pos_rate": 0.0, "auc": 0.0, "eer": 1.0}
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
@@ -397,7 +427,7 @@ def evaluate(
     if skipped_batches > 0:
         print(f"[Warn] skipped {skipped_batches} non-finite batches during eval")
     if len(all_logits) == 0:
-        empty_m = {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": 0.0, "eer": 1.0}
+        empty_m = {"acc": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "f0.5": 0.0, "pred_pos_rate": 0.0, "auc": 0.0, "eer": 1.0}
         if return_outputs:
             return float("nan"), empty_m, None, None
         return float("nan"), empty_m, None, None
@@ -415,15 +445,17 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: optim.Optimizer,
     epoch: int,
-    best_f1: float,
+    best_score: float,
     best_threshold: float,
+    best_metric: str,
 ) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(
         {
             "epoch": epoch,
-            "best_f1": best_f1,
+            "best_score": best_score,
             "best_threshold": best_threshold,
+            "best_metric": best_metric,
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
         },
@@ -431,7 +463,7 @@ def save_checkpoint(
     )
 
 
-def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, device: torch.device) -> Tuple[int, float, float]:
+def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, device: torch.device) -> Tuple[int, float, float, str]:
     try:
         ckpt = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
@@ -439,7 +471,9 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: optim.Optimizer, dev
     model.load_state_dict(ckpt["state_dict"])
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
-    return int(ckpt.get("epoch", 0)), float(ckpt.get("best_f1", 0.0)), float(ckpt.get("best_threshold", 0.5))
+    best_score = float(ckpt.get("best_score", ckpt.get("best_f1", 0.0)))
+    best_metric = str(ckpt.get("best_metric", "f1"))
+    return int(ckpt.get("epoch", 0)), best_score, float(ckpt.get("best_threshold", 0.5)), best_metric
 
 
 def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
@@ -456,6 +490,7 @@ def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
         train=True,
         seed=args.seed,
         hard_negative_ratio=args.hard_negative_ratio,
+        neg_pos_ratio=args.neg_pos_ratio,
     )
     val_set = SGNPairDataset(
         val_x,
@@ -466,6 +501,7 @@ def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
         train=False,
         seed=args.seed + 1,
         hard_negative_ratio=args.hard_negative_ratio,
+        neg_pos_ratio=args.neg_pos_ratio,
     )
     test_set = SGNPairDataset(
         test_x,
@@ -476,6 +512,7 @@ def build_pair_loaders(args) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
         train=False,
         seed=args.seed + 2,
         hard_negative_ratio=args.hard_negative_ratio,
+        neg_pos_ratio=args.neg_pos_ratio,
     )
 
     train_loader = DataLoader(
@@ -522,8 +559,10 @@ def parse_args():
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--motion-only", action="store_true")
     parser.add_argument("--decision-threshold", type=float, default=0.5)
-    parser.add_argument("--thresh-min", type=float, default=0.1)
-    parser.add_argument("--thresh-max", type=float, default=0.9)
+    parser.add_argument("--thresh-objective", type=str, default="f0.5", choices=["f1", "f0.5", "precision_priority"])
+    parser.add_argument("--target-precision", type=float, default=0.7)
+    parser.add_argument("--thresh-min", type=float, default=0.5)
+    parser.add_argument("--thresh-max", type=float, default=0.99)
     parser.add_argument("--thresh-steps", type=int, default=81)
     parser.add_argument(
         "--pair-arch",
@@ -538,6 +577,7 @@ def parse_args():
         default=0.5,
         help="负样本中采用 hard negative（同动作不同身份）的比例，范围[0,1]",
     )
+    parser.add_argument("--neg-pos-ratio", type=float, default=3.0, help="负正样本比例 K，表示 1:K")
     return parser.parse_args()
 
 
@@ -566,13 +606,16 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     start_epoch = 0
-    best_f1 = 0.0
+    best_score = 0.0
+    best_metric = str(args.thresh_objective)
     best_threshold = float(args.decision_threshold)
     best_path = os.path.join(args.save_dir, f"case{args.case}_best.pth")
 
     if args.resume:
-        start_epoch, best_f1, best_threshold = load_checkpoint(args.resume, model, optimizer, device)
-        print(f"Resume from {args.resume}, epoch={start_epoch}, best_f1={best_f1:.4f}, best_thr={best_threshold:.3f}")
+        start_epoch, best_score, best_threshold, best_metric = load_checkpoint(args.resume, model, optimizer, device)
+        print(
+            f"Resume from {args.resume}, epoch={start_epoch}, best_{best_metric}={best_score:.4f}, best_thr={best_threshold:.3f}"
+        )
 
     if args.train == 1:
         for epoch in range(start_epoch, args.epochs):
@@ -583,41 +626,52 @@ def main():
                 model, val_loader, criterion, device, threshold=args.decision_threshold, return_outputs=True
             )
             if va_logits is not None and va_labels is not None:
-                tuned_thr, va_m_tuned = tune_threshold_for_f1(
+                tuned_thr, va_m_tuned = tune_threshold(
                     va_logits,
                     va_labels,
+                    objective=args.thresh_objective,
                     min_thr=args.thresh_min,
                     max_thr=args.thresh_max,
                     steps=args.thresh_steps,
+                    target_precision=args.target_precision,
                 )
             else:
                 tuned_thr, va_m_tuned = float(args.decision_threshold), va_m
+            current_score = float(va_m_tuned[args.thresh_objective])
             print(
                 f"Epoch {epoch + 1:03d} | "
-                f"Train loss {tr_loss:.4f} acc {tr_m['acc']:.4f} f1 {tr_m['f1']:.4f} auc {tr_m['auc']:.4f} eer {tr_m['eer']:.4f} | "
-                f"Val loss {va_loss:.4f} acc {va_m_tuned['acc']:.4f} f1 {va_m_tuned['f1']:.4f} auc {va_m_tuned['auc']:.4f} eer {va_m_tuned['eer']:.4f} thr {tuned_thr:.3f}"
+                f"Train loss {tr_loss:.4f} acc {tr_m['acc']:.4f} precision {tr_m['precision']:.4f} recall {tr_m['recall']:.4f} "
+                f"f1 {tr_m['f1']:.4f} f0.5 {tr_m['f0.5']:.4f} pos {tr_m['pred_pos_rate']:.4f} auc {tr_m['auc']:.4f} eer {tr_m['eer']:.4f} | "
+                f"Val loss {va_loss:.4f} acc {va_m_tuned['acc']:.4f} precision {va_m_tuned['precision']:.4f} recall {va_m_tuned['recall']:.4f} "
+                f"f1 {va_m_tuned['f1']:.4f} f0.5 {va_m_tuned['f0.5']:.4f} pos {va_m_tuned['pred_pos_rate']:.4f} "
+                f"auc {va_m_tuned['auc']:.4f} eer {va_m_tuned['eer']:.4f} thr {tuned_thr:.3f} sel {args.thresh_objective}={current_score:.4f}"
             )
-            if va_m_tuned["f1"] >= best_f1:
-                best_f1 = va_m_tuned["f1"]
+            if current_score >= best_score:
+                best_score = current_score
+                best_metric = str(args.thresh_objective)
                 best_threshold = tuned_thr
-                save_checkpoint(best_path, model, optimizer, epoch + 1, best_f1, best_threshold)
-                print(f"Saved best checkpoint to {best_path} (f1={best_f1:.4f}, thr={best_threshold:.3f})")
+                save_checkpoint(best_path, model, optimizer, epoch + 1, best_score, best_threshold, best_metric)
+                print(
+                    f"Saved best checkpoint to {best_path} ({best_metric}={best_score:.4f}, thr={best_threshold:.3f})"
+                )
 
     if os.path.exists(best_path):
-        _, best_f1, best_threshold = load_checkpoint(best_path, model, optimizer=None, device=device)
-        print(f"Loaded best checkpoint: {best_path} (f1={best_f1:.4f}, thr={best_threshold:.3f})")
+        _, best_score, best_threshold, best_metric = load_checkpoint(best_path, model, optimizer=None, device=device)
+        print(f"Loaded best checkpoint: {best_path} ({best_metric}={best_score:.4f}, thr={best_threshold:.3f})")
 
     if args.train == 0:
         _, va_m, va_logits, va_labels = evaluate(
             model, val_loader, criterion, device, threshold=args.decision_threshold, return_outputs=True
         )
         if va_logits is not None and va_labels is not None:
-            best_threshold, _ = tune_threshold_for_f1(
+            best_threshold, _ = tune_threshold(
                 va_logits,
                 va_labels,
+                objective=args.thresh_objective,
                 min_thr=args.thresh_min,
                 max_thr=args.thresh_max,
                 steps=args.thresh_steps,
+                target_precision=args.target_precision,
             )
 
     te_loss, te_m, _, _ = evaluate(model, test_loader, criterion, device, threshold=best_threshold, return_outputs=False)
