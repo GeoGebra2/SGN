@@ -637,7 +637,12 @@ def main():
                 )
             else:
                 tuned_thr, va_m_tuned = float(args.decision_threshold), va_m
-            current_score = float(va_m_tuned[args.thresh_objective])
+            score_tuple = _threshold_score(
+                va_m_tuned,
+                objective=args.thresh_objective,
+                target_precision=args.target_precision,
+            )
+            current_score = float(score_tuple[0])
             print(
                 f"Epoch {epoch + 1:03d} | "
                 f"Train loss {tr_loss:.4f} acc {tr_m['acc']:.4f} precision {tr_m['precision']:.4f} recall {tr_m['recall']:.4f} "
