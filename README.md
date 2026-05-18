@@ -94,7 +94,16 @@ contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additio
 
 `python main_pair.py --train 1 --case 1 --hard-negative-ratio 0.7`
 
-生成primitive:
+比方说骨骼文件保存在data/ntu/下的某个文件夹。
+先执行
+`python build_statistic.py --skes_dir \path\to\dataset`
+然后进入`get_raw_skes_data.py`把`skes_dir`修改为`\path\to\dataset`
+然后执行`python get_raw_skes_data.py`
+然后执行`python get_raw_denoised_data.py`
+然后执行`python seq_transformation.py`
+
+如果要生成primitive，可以执行
 `python data/ntu/build_primitive_dataset.py --source_h5 data/ntu/NTU_ID_CV.h5 --out_h5 data/ntu/NTU_PRIM_CV.h5 --label_mode id --extract_mode paper --out_len 20 --min_len 4 --max_segments 6 --beta_v 0.02 --beta_s 0.002 --max_len 80 --dpm_components 128 --dpm_decimate 5 --dpm_accept_ratio 0.8`
 
+使用如下命令训练：
 ` python main_pair.py --train 1 --case 1 --pair-arch A --hard-negative-ratio 0.7 --epochs 120 --loss-type bce --neg-pos-ratio 1 --thresh-objective f1 --thresh-min 0.55 --thresh-max 0.9`
